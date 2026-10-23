@@ -34,7 +34,6 @@ An **orchestrator** (a high-capability AI agent) plans, assigns and decides; sev
 The development machine (Linux) could not do everything at once: emulation, builds and analysis in parallel.
 
 - A **Windows PC** on the local network joined as a *worker* over SSH: agents send it jobs (builds, Vita3K emulator runs, video recording, running the original game), with locks to avoid collisions and disk guards.
-- **Lesson learned:** a remote runner filled the system disk by copying the repo on every run. It was cleaned up, that PC's Linux environment (WSL) was moved to another disk, and since then there is an explicit rule and an automatic free-space guard.
 - **The real PS Vita** is part of the harness: builds are uploaded over FTP with SHA-256 verification and runtime logs are pulled back for analysis. The console is the final source of truth; the emulator is not enough (it showed neither the noisy audio nor the software rendering caused by an old save file).
 
 ## 4. Reverse engineering
@@ -49,7 +48,7 @@ The development machine (Linux) could not do everything at once: emulation, buil
 1. **Evidence before opinion.** No fix is accepted without measurement: console logs, frame-time telemetry, A/B videos, tests. Reviews reject causal conclusions the data does not support.
 2. **Mandatory adversarial review**, with a checklist focused on what AI tends to get wrong: concurrency, memory ownership between CPU and GPU, memory ordering (x86 TSO vs weak ARMv7), real-time constraints, use-after-free. About 490 written reviews.
 3. **Thinking at the operating-system level.** Threads and per-core affinity (game, rendering and audio on separate cores), bounded queues, per-frame time budgets (25 ms for 40 Hz) and measuring where every millisecond goes.
-4. **Human in the loop for decisions.** The human sets goals, priorities and constraints ("make it work like the original", "zero interpolation", "don't touch the C: drive"), plays on the real console and reports back. The AI executes, measures and proposes; it does not decide on its own what is acceptable.
+4. **Human in the loop for decisions.** The human sets goals, priorities and constraints ("make it work like the original", "zero interpolation"), plays on the real console and reports back. The AI executes, measures and proposes; it does not decide on its own what is acceptable.
 5. **Legal and publication hygiene.** No original game data is versioned; the public repository went through a license, attribution and private-data review before release.
 
 ## 6. What we learned
