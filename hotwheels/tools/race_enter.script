@@ -1,0 +1,10 @@
+# Pulsos Return (DIK 0x1c) estables por frames; cuatro pantallas Wine.
+# Pulsos extra permiten saltar intro y elegir menú aunque cambie su duración.
+100 0x1c 3
+160 0x1c 3
+220 0x1c 3
+280 0x1c 3
+340 0x1c 3
+400 0x1c 3
+460 0x1c 3
+520 0x1c 3

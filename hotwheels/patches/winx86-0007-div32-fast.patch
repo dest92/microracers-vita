@@ -1,0 +1,40 @@
+diff --git a/third_party/box86-dynarec/emu/x86primop.c b/third_party/box86-dynarec/emu/x86primop.c
+index 2d29308..0ba006b 100755
+--- a/third_party/box86-dynarec/emu/x86primop.c
++++ b/third_party/box86-dynarec/emu/x86primop.c
+@@ -1205,9 +1205,19 @@ void idiv32(x86emu_t *emu, uint32_t s)
+ 		INTR_RAISE_DIV0(emu);
+ 		return;
+ 	}
++	/* hotwheels winx86-0007: el A9 no divide en hardware y lldiv es división
++	 * de 64 bits por software. Si EDX:EAX cabe en int32, basta una división de
++	 * 32 bits (mismo cociente/resto). EAX == INT32_MIN queda en el camino
++	 * original (INT32_MIN/-1 desborda; y el original rechaza el cociente
++	 * -2^31 con #DE). Equivalencia: hotwheels/tests/test_div32_fast.c. */
++	if (R_EDX == (uint32_t)((int32_t)R_EAX >> 31) && R_EAX != 0x80000000u) {
++		quot = (int32_t)R_EAX / (int32_t)s;
++		mod = (int32_t)R_EAX % (int32_t)s;
++	} else {
+ 	lldiv_t p = lldiv(dvd, (int32_t)s);
+ 	quot = p.quot;
+ 	mod = p.rem;
++	}
+ 	if (llabs(quot) > 0x7fffffff) {
+ 		INTR_RAISE_DIV0(emu);
+ 		return;
+@@ -1289,8 +1299,15 @@ void div32(x86emu_t *emu, uint32_t s)
+ 		INTR_RAISE_DIV0(emu);
+ 		return;
+ 	}
++	/* hotwheels winx86-0007: EDX == 0 → una división de 32 bits (antes: dos
++	 * divisiones de 64 bits por software en el A9). */
++	if (R_EDX == 0) {
++		div = R_EAX / s;
++		mod = R_EAX % s;
++	} else {
+ 	div = dvd / (uint32_t)s;
+ 	mod = dvd % (uint32_t)s;
++	}
+ 	if (div > 0xffffffff) {
+ 		INTR_RAISE_DIV0(emu);
+ 		return;

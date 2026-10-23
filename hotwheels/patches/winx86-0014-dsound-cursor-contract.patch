@@ -1,0 +1,104 @@
+diff --git a/src/runtime/ds_cursor.h b/src/runtime/ds_cursor.h
+new file mode 100644
+index 0000000..60a28c3
+--- /dev/null
++++ b/src/runtime/ds_cursor.h
+@@ -0,0 +1,59 @@
++// Shared geometry of the DirectSound cursor contract. See SPEC-048 (HW-069).
++//
++// The guest writes through the pointer Lock() handed it, WITHOUT taking g_mx, so
++// no host-side lock can exclude it. The only possible guarantee is geometric:
++// the write cursor must lead the play cursor by at least the window the mixer
++// reads in one grain, in source bytes and scaled by the voice's current
++// frequency — a voice pitched to 32342 Hz consumes ceil(512*32342/22050) source
++// frames per 512-frame grain, not 512.
++//
++// Single definition: ds_emul.cpp's write_cursor() only calls into here, and the
++// host test (tests/run_ds_cursor_contract.sh) exercises these functions
++// directly, so the arithmetic is not duplicated anywhere.
++#pragma once
++#include <cstdint>
++
++namespace d2rt { namespace dsound {
++
++// Frames the resampler may read past the frame it interpolates: mix_voice reads
++// `pos` and `np` = pos + blockAlign, i.e. ONE frame ahead (ds_resample.h).
++constexpr uint32_t kResamplerLookahead = 1;
++
++// Source frames the play cursor advances per grain (floor; mix_grain keeps the
++// remainder in its accumulator).
++inline uint32_t cursor_advance_frames(uint32_t frames, uint32_t rate, uint32_t kRate) {
++    if (!kRate) return 0;
++    return (uint32_t)((uint64_t)frames * rate / kRate);
++}
++
++// Upper bound of source frames the mixer reads in one grain: the frames it
++// advances by, plus the one frame the resampler looks ahead.
++inline uint32_t read_window_frames(uint32_t frames, uint32_t rate, uint32_t kRate) {
++    if (!kRate) return kResamplerLookahead;
++    return (uint32_t)(((uint64_t)frames * rate + kRate - 1) / kRate) + kResamplerLookahead;
++}
++
++// Lead of the write cursor over the play cursor, in bytes: the read window of
++// the grain plus one grain of slack for the guest's fill, clamped so the write
++// cursor never wraps the whole buffer. A buffer of a single frame
++// (len == blockAlign) is degenerate: the write cursor then coincides with the
++// play cursor.
++inline uint32_t cursor_lead_bytes(uint32_t len, uint32_t blockAlign, uint32_t rate,
++                                  uint32_t kRate, uint32_t frames) {
++    if (!len || !blockAlign) return 0;
++    const uint32_t lead = (read_window_frames(frames, rate, kRate)
++                           + cursor_advance_frames(frames, rate, kRate)) * blockAlign;
++    const uint32_t hi = len > blockAlign ? len - blockAlign : blockAlign;
++    if (lead > hi) return hi;
++    return lead;  // >= blockAlign por construcción: la ventana tiene >= 1 frame
++}
++
++// Write cursor the guest sees: the play cursor plus the lead, wrapped.
++inline uint32_t write_cursor_bytes(uint32_t cursor, uint32_t len, uint32_t blockAlign,
++                                   uint32_t rate, uint32_t kRate, uint32_t frames) {
++    if (!len) return 0;
++    const uint32_t lead = cursor_lead_bytes(len, blockAlign, rate, kRate, frames);
++    return (uint32_t)(((uint64_t)cursor + lead) % len);
++}
++
++}}  // namespace d2rt::dsound
+diff --git a/src/runtime/ds_emul.cpp b/src/runtime/ds_emul.cpp
+index d1d5ce0..a87facd 100644
+--- a/src/runtime/ds_emul.cpp
++++ b/src/runtime/ds_emul.cpp
+@@ -10,6 +10,7 @@
+ #include "runtime/gil.h"
+ #include "runtime/host_clock.h"
+ #include "runtime/ds_resample.h"
++#include "runtime/ds_cursor.h"
+ 
+ #include <cstdio>
+ #include <cstring>
+@@ -634,18 +635,15 @@ uint32_t m_buf_getcaps(Cpu& c) {
+     c.write(p, caps, (uint32_t)sizeof caps);
+     return DS_OK;
+ }
+-// The write cursor must never equal the read cursor: a streaming pump would
+-// otherwise believe the whole ring is free and overwrite audio still being
+-// played (choppy sound). Fixed advance of two grains, capped at a quarter of
+-// the buffer. One single definition, shared by GetCurrentPosition and
+-// DSBLOCK_FROMWRITECURSOR: two diverging formulas would reopen exactly the
+-// gap this closes. Called under g_mx.
++// The guest writes through Lock()'s pointer without taking g_mx, so the only
++// guarantee against overwriting data the mixer still reads is geometric: the
++// write cursor must lead the play cursor by at least the mix read window of a
++// grain, in source bytes and scaled by the voice's current rate (see
++// ds_cursor.h and SPEC-048 frente 2). One single definition, shared by
++// GetCurrentPosition and DSBLOCK_FROMWRITECURSOR: two diverging formulas would
++// reopen exactly the gap this closes. Called under g_mx.
+ uint32_t write_cursor(const Voice& v) {
+-    if (!v.len) return 0;
+-    uint32_t lead = (uint32_t)(2 * kGrain) * v.blockAlign;
+-    if (lead > v.len / 4) lead = v.len / 4;
+-    if (lead < v.blockAlign) lead = v.blockAlign;
+-    return (uint32_t)(((uint64_t)v.cursor + lead) % v.len);
++    return write_cursor_bytes(v.cursor, v.len, v.blockAlign, v.rate, (uint32_t)kRate, (uint32_t)kGrain);
+ }
+ 
+ // Host-view retry, on the guest thread. The audio thread has no Cpu&, so if

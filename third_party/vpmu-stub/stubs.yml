@@ -1,0 +1,13 @@
+# Optional vpmu interface only; no kernel plugin is included.
+# NIDs match the weak stub used by the port.
+modules:
+  vpmu:
+    nid: 0xca4f8bc2
+    libraries:
+      vpmu:
+        nid: 0xca4f8bc2
+        kernel: false
+        version: 0x1
+        functions:
+          vpmuEnableUser: 0x0e5da7c4
+          vpmuGetUserEnable: 0x4db8d9a9

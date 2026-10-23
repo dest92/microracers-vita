@@ -1,0 +1,15 @@
+diff --git a/src/runtime/bridge.h b/src/runtime/bridge.h
+index ade3385..ef101df 100644
+--- a/src/runtime/bridge.h
++++ b/src/runtime/bridge.h
+@@ -180,6 +180,10 @@ public:
+     void redirect_next(uint32_t va);
+     uint32_t take_redirect();          // 0 = none (consumes)
+     uint32_t sentinel() const { return sentinel_; }
++    // Top (exclusive end) of the main guest stack mapped by commit(), after
++    // any layout override (D2LAYOUT / WX86_STACKBASE). Lets a consumer start
++    // its main thread without duplicating the private defaults.
++    uint32_t stack_top() const { return stack_base_ + stack_size_; }
+ 
+ private:
+     struct Mod {

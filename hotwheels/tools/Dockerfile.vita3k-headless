@@ -1,0 +1,16 @@
+# Dockerfile.vita3k-headless — capa para el harness automático (HW-014).
+#
+# Se apoya en la imagen de deepseek `vita3k-runtime:26.04` (hotwheels/tools/vita3k/)
+# SIN modificarla: sólo agrega lo que falta para correr sin escritorio humano
+# (Xvfb) y para capturar evidencia (screenshot).
+FROM vita3k-runtime:26.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        xvfb x11-utils x11-apps imagemagick procps gcc libc6-dev libxtst-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Xvfb y los binarios de captura quedan disponibles; el harness los invoca.
+COPY vita3k/send_keys.c /tmp/hw-send-keys.c
+RUN gcc -O2 -Wall -Wextra -Werror /tmp/hw-send-keys.c -o /usr/local/bin/hw-send-keys \
+        -lX11 -lXtst && rm /tmp/hw-send-keys.c

@@ -1,0 +1,46 @@
+site_name: winx86
+site_description: Generic x86 → ARMv7 engine for porting Windows games (PE32) to PS Vita
+site_url: https://franckrst.github.io/WinVita/
+repo_url: https://github.com/Franckrst/WinVita
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep orange
+      accent: orange
+  features:
+    - navigation.sections
+    - content.code.copy
+    - toc.follow
+
+nav:
+  - Home: index.md
+  - Quick start: demarrage.md
+  - Architecture: architecture.md
+  - "Extension point — porting your game": extension.md
+  - "Migrating an existing port": migration.md
+  - "Win32 shims provided (generated)": shims.md
+  - AI tooling / reusable agents: outils-ia.md
+  - History and provenance: historique.md
+  - Known limitations / technical debt: dette.md
+  - Lexicon: lexique.md
+
+plugins:
+  - i18n:
+      docs_structure: suffix
+      languages:
+        - locale: en
+          name: English
+          build: true
+          default: true
+        - locale: fr
+          name: Français
+          build: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - toc:
+      permalink: true

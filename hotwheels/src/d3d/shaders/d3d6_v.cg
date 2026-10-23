@@ -1,0 +1,17 @@
+void main(
+  float2 aPos,
+  float2 aTex,
+  float4 aCol,
+  float  aPal,
+  uniform float4 uScale,
+  float4 out vPosition : POSITION,
+  float2 out vTex : TEXCOORD0,
+  float4 out vCol : COLOR0,
+  float  out vPal : TEXCOORD1)
+{
+  vPosition = float4(aPos.x * uScale.x + uScale.z,
+                     aPos.y * uScale.y + uScale.w, 0.5f, 1.0f);
+  vTex = aTex;
+  vCol = float4(aCol.z, aCol.y, aCol.x, aCol.w);
+  vPal = aPal;
+}

@@ -1,0 +1,11 @@
+# Suites de `tests/test_*.sh` que NO corren en el gate `run_all` porque necesitan
+# insumos que no están versionados (el exe del juego, toolchains, consola, red).
+# Se reportan `SKIP` en la etapa 4 y no cuentan como fallo: un checkout limpio de
+# HEAD debe poder correr el gate sin copiar el juego ni el SDK.
+#
+# Formato: un nombre de archivo por línea; `#` inicia un comentario.
+# Al versionar el insumo (o al hacer que la suite se auto-saltee sin él), sacala
+# de esta lista: la etapa 4 la corre y el gate la vigila.
+
+# Necesita exe del juego + ARM Linux gcc/g++ + qemu-arm (rutas del árbol, no del repo).
+test_init_qemu_prereqs.sh

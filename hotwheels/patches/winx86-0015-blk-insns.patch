@@ -1,0 +1,59 @@
+--- a/src/dynarec86/dyn86.c
++++ b/src/dynarec86/dyn86.c
+@@ -84,6 +84,14 @@
+ uint64_t dyn86_jp_clock_bias_ns = 0;
+ uint64_t dyn86_jp_run_us = 0;
+ 
++/* SPEC-053 (HW-072): executed guest ARM instructions, fed at the one C-level
++ * funnel (DBGetBlock). Needs WX86_CHAIN=0: with direct linking the TB->TB
++ * transition never reaches C. Off: the DBGetBlock gate is one global load. */
++int dyn86_blkprof = 0;
++uint64_t dyn86_blkprof_total = 0;
++uint64_t dyn86_blkprof_insns(void) { return dyn86_blkprof_total; }
++void dyn86_blkprof_enable(int on) { dyn86_blkprof = on; }
++
+ /* HW-051: one serialized dynarec publishes a best-effort current guest EIP. */
+ static volatile uint32_t guestprof_enabled;
+ static volatile uint32_t guestprof_state;
+--- a/src/dynarec86/dyn86.h
++++ b/src/dynarec86/dyn86.h
+@@ -130,6 +130,15 @@
+ extern uint64_t dyn86_jp_lookup_ns;      /* SAMPLED lookup time (bias removed) */
+ extern uint64_t dyn86_jp_lookup_smp;     /* samples actually taken */
+ 
++/* SPEC-053 (HW-072): executed guest ARM instructions. Fed once per valid block
++ * entry at DBGetBlock (the C funnel), so it needs WX86_CHAIN=0 — with direct
++ * linking the TB->TB transition never reaches C and the count stops growing.
++ * Of a block only its code size is taken (block->size/4): literal pools emitted
++ * inside it count as instructions. Contract and cross-check: SPEC-053. */
++extern int dyn86_blkprof;
++uint64_t dyn86_blkprof_insns(void);
++void dyn86_blkprof_enable(int on);
++
+ /* Raise/clear the explicit stop flag (volatile int). */
+ void dyn86_set_stop(int v);
+ 
+--- a/third_party/box86-dynarec/dynarec/dynablock.c
++++ b/third_party/box86-dynarec/dynarec/dynablock.c
+@@ -40,6 +40,9 @@
+  * exactly as before. Nothing here touches code generation or linking. */
+ extern int dyn86_jitprof;
+ extern uint64_t dyn86_jp_clock_bias_ns;
++/* SPEC-053 (HW-072): defined in src/dynarec86/dyn86.c. */
++extern int dyn86_blkprof;
++extern uint64_t dyn86_blkprof_total;
+ #define DYN86_JP_SAMPLE 64u
+ uint64_t dyn86_jp_lookup_calls = 0;
+ uint64_t dyn86_jp_lookup_hits  = 0;
+@@ -1014,6 +1017,11 @@
+         dt = (dt > dyn86_jp_clock_bias_ns) ? dt - dyn86_jp_clock_bias_ns : 0;
+         dyn86_jp_lookup_ns += dt; ++dyn86_jp_lookup_smp;
+     }
++    // SPEC-053 (HW-072): a valid block is about to be ENTERED, so its ARM code
++    // is about to run; add its size. Only reached when linking is funneled
++    // (WX86_CHAIN=0) — otherwise the count would silently miss chained blocks.
++    if(dyn86_blkprof && db && db->block && db->done)
++        dyn86_blkprof_total += (uint64_t)(db->size >> 2);
+     return db;
+ }
+ 

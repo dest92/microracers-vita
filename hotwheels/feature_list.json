@@ -1,0 +1,809 @@
+{
+ "project": "hotwheels",
+ "features": [
+  {
+   "id": "HW-001",
+   "title": "Triage del exe: imports, motor, overlay, anti-tamper, CRT, API gráfica/audio/input",
+   "deps": [],
+   "status": "done",
+   "owner": "sol",
+   "milestone": "M0",
+   "spec": "specs/001-triage-estatico.md"
+  },
+  {
+   "id": "HW-002",
+   "title": "Correr el exe en Wine como referencia x86 (traza de imports usados, archivos abiertos)",
+   "deps": [
+    "HW-001"
+   ],
+   "status": "done",
+   "owner": "wine",
+   "milestone": "M0",
+   "spec": null
+  },
+  {
+   "id": "HW-003",
+   "title": "Inventario winx86/D2Vita: qué shims existen vs imports que pide HW; gap list",
+   "deps": [
+    "HW-001"
+   ],
+   "status": "done",
+   "owner": "luna",
+   "milestone": "M0",
+   "spec": null
+  },
+  {
+   "id": "HW-004",
+   "title": "Instalar/compilar Vita3K y validar con un homebrew trivial + D2Vita vpk",
+   "deps": [],
+   "status": "done",
+   "owner": "deepseek",
+   "milestone": "M0",
+   "spec": null
+  },
+  {
+   "id": "HW-005",
+   "title": "Esqueleto hotwheels-vita: build vitasdk enlazando winx86, carga PE del exe (test host-side primero)",
+   "deps": [
+    "HW-003"
+   ],
+   "status": "done",
+   "owner": "impl",
+   "milestone": "M1",
+   "spec": "hotwheels/specs/001-skeleton.md"
+  },
+  {
+   "id": "HW-006",
+   "title": "Shims base M1 (gap-list.md): KERNEL32/USER32 faltantes, Toolhelp32 (1 proceso), unidad CD virtual (GetDriveType/GetLogicalDriveStrings/CreateFile \\\\.\\D: + ioctl), FS case-insensitive, reloj QPC/timeGetTime coherente, DirectDrawEnumerateExA",
+   "deps": [
+    "HW-005"
+   ],
+   "status": "done",
+   "owner": "re",
+   "milestone": "M2",
+   "spec": "hotwheels/specs/006-shims-base.md"
+  },
+  {
+   "id": "HW-007",
+   "title": "Integración guiada por trampas: HotWheels.exe real bajo qemu-arm (tier 1) hasta el menú, frames a PNG; luego Vita3K",
+   "deps": [],
+   "status": "done",
+   "owner": "integ",
+   "milestone": "M3",
+   "spec": "hotwheels/specs/013-boot-integration.md"
+  },
+  {
+   "id": "HW-008",
+   "title": "RE del motor: WinMain, loop, timing, threads, render D3D6/DDraw, audio, input, IO de archivos",
+   "deps": [
+    "HW-001"
+   ],
+   "status": "done",
+   "owner": "re",
+   "milestone": "M2",
+   "spec": null
+  },
+  {
+   "id": "HW-009",
+   "title": "Runtime Vita de hotwheels-vita: arena/layout de memoria, kubridge, scheduler (paridad con rt_boot de D2Vita), validado en Vita3K hasta el entry point",
+   "deps": [
+    "HW-005",
+    "HW-004"
+   ],
+   "status": "done",
+   "owner": "impl",
+   "milestone": "M1",
+   "spec": "hotwheels/specs/002-vita-runtime.md"
+  },
+  {
+   "id": "HW-010",
+   "title": "Renderer: shim DirectDraw4/Direct3D6 COM → ring de comandos → backend vitaGL (fallback GXM directo)",
+   "deps": [
+    "HW-008",
+    "HW-011"
+   ],
+   "status": "done",
+   "owner": "render",
+   "milestone": "M3",
+   "spec": "hotwheels/specs/003-d3d6-renderer.md"
+  },
+  {
+   "id": "HW-011",
+   "title": "vitaGL: vendorizar/compilar con vitasdk; rutas GXP integradas (FFP standalone Vita3K limitado)",
+   "deps": [
+    "HW-004"
+   ],
+   "status": "done",
+   "owner": "render",
+   "milestone": "M3",
+   "spec": "hotwheels/specs/018-vitagl-gxp-scope.md",
+   "resolution": "Alcance GXP integrado aprobado por Luna (`re-review-HW-011-luna.md`, `97a75d4`, reafirmado `01d2266`): P8 por HW-021 y D3D6 por HW-029. BUG-015 mitigado para el juego; sample FFP standalone sigue como limitación Vita3K separada."
+  },
+  {
+   "id": "HW-012",
+   "title": "Traza Wine de una CARRERA (camino D3D6) en Xvfb aislado, con navegación automática de menú",
+   "deps": [
+    "HW-002"
+   ],
+   "status": "done",
+   "owner": "wine",
+   "milestone": "M5",
+   "spec": null
+  },
+  {
+   "id": "HW-013",
+   "title": "Shim DirectDraw (DirectDrawCreate/IDirectDraw→IDirectDraw4, SetCooperativeLevel, SetDisplayMode 640x480x8, superficies primaria/back/offscreen sysmem, Lock/Unlock/BltFast/Blt/Flip, IDirectDrawPalette) con presentación abstracta (paleta→RGBA) testeable en host; IDirect3D3::CreateDevice falla limpio",
+   "deps": [
+    "HW-005"
+   ],
+   "status": "done",
+   "owner": "sol",
+   "milestone": "M3",
+   "spec": "hotwheels/specs/004-ddraw-software.md"
+  },
+  {
+   "id": "HW-015",
+   "title": "WINMM: mmio* (RIFF/WAV) + mciSendCommandA 'cdaudio' emulado con .wav de MUSIC/ (silencio si falta), tests host",
+   "deps": [
+    "HW-005"
+   ],
+   "status": "done",
+   "owner": "deepseek",
+   "milestone": "M2",
+   "spec": "hotwheels/specs/005-winmm.md"
+  },
+  {
+   "id": "HW-016",
+   "title": "DINPUT: DirectInputCreateA + IDirectInput/Device2 (teclado, mouse, joystick, Poll/GetDeviceState) → sceCtrl/sceTouch con mapeo configurable",
+   "deps": [
+    "HW-005"
+   ],
+   "status": "done",
+   "owner": "deepseek",
+   "milestone": "M4",
+   "spec": "hotwheels/specs/007-dinput.md"
+  },
+  {
+   "id": "HW-017",
+   "title": "Empaquetado: VPK (sce_sys, livearea, param.sfo, TITLEID), ubicación de datos ux0:data/hotwheels, guía de instalación con datos propios del usuario (sin assets en el repo)",
+   "deps": [
+    "HW-005"
+   ],
+   "status": "done",
+   "owner": "ports",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/008-packaging.md"
+  },
+  {
+   "id": "HW-014",
+   "title": "Harness de validación AUTOMÁTICA en Vita3K (Xvfb, install+run, screenshot+log, timeout); validado con hello y sample vitaGL FFP",
+   "deps": [
+    "HW-004"
+   ],
+   "status": "done",
+   "owner": "investigador",
+   "milestone": "M1",
+   "spec": "hotwheels/docs/vita3k-harness.md"
+  },
+  {
+   "id": "HW-018",
+   "title": "Backend de audio Vita: mezclador + hilo sceAudioOut para DSound emulado (winx86 ds_emul HostOps) y música WAV de HW-015; 22050→48000 Hz",
+   "deps": [
+    "HW-015"
+   ],
+   "status": "done",
+   "owner": "ports",
+   "milestone": "M4",
+   "spec": "hotwheels/specs/009-audio-vita.md"
+  },
+  {
+   "id": "HW-019",
+   "title": "tools/smoke.sh: un comando que corre tests host + build Vita + run qemu-arm + Vita3K (harness HW-014) y deja un resumen (trampas, MISSING, frames, tiempo) en hotwheels/out/smoke-<fecha>.md",
+   "deps": [
+    "HW-014"
+   ],
+   "status": "done",
+   "owner": "investigador",
+   "milestone": "M1",
+   "spec": "hotwheels/tools/smoke.sh"
+  },
+  {
+   "id": "HW-020",
+   "title": "IO Vita: mapeo C:\\/cwd→ux0:data/hotwheels, settings.dat/highscore.dat escribibles, caché RAM de archivos chicos (lecturas completas), config de usuario (mapa de botones, escalado) en ux0:data/hotwheels/hwvita.ini",
+   "deps": [
+    "HW-006"
+   ],
+   "status": "done",
+   "owner": "ports",
+   "milestone": "M4",
+   "spec": "hotwheels/specs/010-io-vita.md"
+  },
+  {
+   "id": "HW-021",
+   "title": "Backend Vita de present() 8bpp: textura P8 vitaGL (vglGetTexDataPointer) + paleta, fit_rect 640x480→725x544, vsync; validado en Vita3K con frames sintéticos y luego con el juego",
+   "deps": [
+    "HW-013",
+    "HW-011"
+   ],
+   "status": "done",
+   "owner": "sol",
+   "milestone": "M3",
+   "spec": "hotwheels/specs/011-present-vita.md"
+  },
+  {
+   "id": "HW-022",
+   "title": "InputSource Vita para DINPUT: sceCtrl (ext2, analógicos con zona muerta) + touch frontal→mouse para menús; lee mapa de hwvita.ini (HW-020)",
+   "deps": [
+    "HW-016"
+   ],
+   "status": "done",
+   "owner": "deepseek",
+   "milestone": "M4",
+   "spec": "hotwheels/specs/007-dinput.md"
+  },
+  {
+   "id": "HW-023",
+   "title": "60 fps: RE del timing (busy-wait 25 ms @0x412df0, ¿física paso fijo o dt?), elegir estrategia (tick 60 Hz si la física es dt-based / interpolación de render tipo replay60 de D2Vita / lógica 40 + presentación 60) y medir en consola cuando se habilite",
+   "deps": [
+    "HW-008"
+   ],
+   "status": "done",
+   "owner": "luna",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/012-60fps.md"
+  },
+  {
+   "id": "HW-024",
+   "title": "Jugable 100% con botones físicos: mapa por defecto completo (menús, carrera, pausa, 2 jugadores no), sin requerir touch ni teclado; prompts/teclas del juego remapeados",
+   "deps": [
+    "HW-022"
+   ],
+   "status": "done",
+   "owner": "deepseek",
+   "milestone": "M4",
+   "spec": "hotwheels/specs/007-dinput.md"
+  },
+  {
+   "id": "HW-025",
+   "title": "interp60: implementar spec 012 (snapshots inmutables en el ring de HW-010, presentador 60 Hz, correspondencia de primitivas, fallback repetir) + tests host con escenas sintéticas",
+   "deps": [
+    "HW-010",
+    "HW-023"
+   ],
+   "status": "done",
+   "owner": "luna",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/012-60fps.md"
+  },
+  {
+   "id": "HW-026",
+   "title": "Llegar a una CARRERA bajo qemu: inyección de input por guion (DINPUT fuente scriptada) que navegue menú→carrera; frames PNG de carrera; integra renderer D3D6 de render (HW-010) en el boot (CreateDevice real)",
+   "deps": [
+    "HW-007",
+    "HW-010"
+   ],
+   "status": "done",
+   "owner": "integ",
+   "milestone": "M5",
+   "spec": "hotwheels/specs/014-race-boot.md"
+  },
+  {
+   "id": "HW-027",
+   "title": "Soak: correr menú+carrera 30 min bajo qemu sin crash/fuga (RSS, handles), script tools/soak.sh + reporte",
+   "deps": [
+    "HW-026"
+   ],
+   "status": "done",
+   "owner": "qa",
+   "milestone": "M6",
+   "spec": null
+  },
+  {
+   "id": "HW-028",
+   "title": "Paquete 'listo para consola': VPK del juego completo + checklist de prueba en consola real (para cuando el usuario autorice), sin ejecutar en consola",
+   "deps": [
+    "HW-021",
+    "HW-017"
+   ],
+   "status": "done",
+   "owner": "ports",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/015-console-package.md"
+  },
+  {
+   "id": "HW-029",
+   "title": "Carrera D3D6 visible en Vita3K con shaders GXP propios (end-to-end: boot→menú→carrera guionada), screenshot y >30 s sin crash",
+   "deps": [
+    "HW-026",
+    "HW-010"
+   ],
+   "status": "done",
+   "owner": "render",
+   "milestone": "M5",
+   "spec": "hotwheels/specs/017-gxp-d3d6-vita3k-race.md"
+  },
+  {
+   "id": "HW-030",
+   "title": "Carrera completa: largada→3 vueltas→resultados mediante waypoints DINPUT y corrección por posición",
+   "deps": [
+    "HW-029"
+   ],
+   "status": "blocked",
+   "blocked_by": [
+    "BUG-041"
+   ],
+   "owner": "render",
+   "milestone": "M5",
+   "spec": "hotwheels/specs/020-race-completa-vita3k.md"
+  },
+  {
+   "id": "HW-031",
+   "title": "interp60 en carrera real Vita3K: fps_mode=interp60, medir presentaciones/s y pacing con sus gates; comparar original vs interp60 (capturas)",
+   "deps": [
+    "HW-025",
+    "HW-029"
+   ],
+   "status": "done",
+   "owner": "luna",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/012-60fps.md"
+  },
+  {
+   "id": "HW-032",
+   "title": "Build release para consola: sin logs por frame (log async/rate-limited), -O2, knobs de rendimiento de D2Vita (LOGASYNC, NOCANCEL, coeur serveur, WAITROUND), 444 MHz, afinidad de hilos; VPK release + deploy staged (sin instalar)",
+   "deps": [
+    "HW-029"
+   ],
+   "status": "done",
+   "owner": "reviewer",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/019-console-release.md"
+  },
+  {
+   "id": "HW-033",
+   "title": "Runtime winx86: perfilado en consola con vpmu (PMU A9 por hilo: ciclos, IPC, br_mispred, dc_miss) del juego en menú y carrera; identificar hot spots del dynarec/dispatch/GIL/IO",
+   "deps": [],
+   "status": "in_progress",
+   "owner": "runtime",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/019-runtime-perf.md"
+  },
+  {
+   "id": "HW-034",
+   "title": "Runtime winx86: optimizaciones guiadas por HW-033 (encadenamiento de bloques + caché de saltos indirectos, lazy flags, register allocation, direccionamiento directo con base fija, granularidad del GIL, afinidad de hilos); A/B intercalado; D2Vita debe seguir compilando/corriendo",
+   "deps": [
+    "HW-033"
+   ],
+   "status": "in_progress",
+   "owner": "runtime",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/019-runtime-perf.md"
+  },
+  {
+   "id": "HW-035",
+   "title": "Reducir costo host de snapshots/matching interp60: perfilar ciclos, copias y allocations; reutilizar memoria y estimar <2 ms/frame en A9",
+   "deps": [
+    "HW-025",
+    "HW-031"
+   ],
+   "status": "done",
+   "owner": "luna",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/021-interp60-cost.md"
+  },
+  {
+   "id": "HW-036",
+   "title": "Audio anti-jitter: liberar bursts cortos sin hambre permanente; conservar amortiguación y medir latencia/gaps en host",
+   "deps": [
+    "HW-018"
+   ],
+   "status": "done",
+   "owner": "luna",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/023-audio-burst-preservation.md"
+  },
+  {
+   "id": "HW-037",
+   "title": "Regression ejecutable de ownership/retry del GIL en watchdog host",
+   "deps": [],
+   "status": "done",
+   "owner": "bugs",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/024-watchdog-gil-shutdown-test.md"
+  },
+  {
+   "id": "HW-038",
+   "title": "Exponer métricas de underrun/overrun DSound a audio.log para validar BUG-031 en Vita",
+   "deps": [
+    "HW-018",
+    "HW-020"
+   ],
+   "status": "blocked",
+   "owner": "integ",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/025-audio-console-underrun-metrics.md",
+   "blocked_by": [
+    "BUG-035"
+   ],
+   "blocker_reason": "Vita en pantalla de bloqueo; requiere desbloqueo físico y no se debe rebootear. HW-038 espera ≥30 s de carrera en consola."
+  },
+  {
+   "id": "HW-039",
+   "title": "Validar identidad y enlaces del índice BUGS.md",
+   "deps": [],
+   "status": "done",
+   "owner": "bugs",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/026-bug-index-identity.md"
+  },
+  {
+   "id": "HW-040",
+   "title": "Cachear transiciones redundantes de estado GL por escena D3D6 y medir costo de CPU en Vita3K",
+   "deps": [
+    "HW-029"
+   ],
+   "status": "done",
+   "owner": "render",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/027-vitagl-d3d-state-cache.md"
+  },
+  {
+   "id": "HW-041",
+   "title": "Métricas de carga en qemu: ttf1/fps_10_30/frames_60 con gates LOAD_TTF1_MAX_S/LOAD_FPS_MIN (tools/load_metrics.sh)",
+   "deps": [
+    "HW-027"
+   ],
+   "status": "done",
+   "owner": "mimo",
+   "milestone": "M6",
+   "spec": "specs/024-load-metrics.md"
+  },
+  {
+   "id": "HW-042",
+   "title": "Detectar detalles de bugs sin fila en BUGS.md",
+   "deps": [
+    "HW-039"
+   ],
+   "status": "done",
+   "owner": "bugs",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/028-bug-index-completeness.md"
+  },
+  {
+   "id": "HW-043",
+   "title": "Sincronizar metadatos de cierre BUG-002/003",
+   "deps": [
+    "HW-042"
+   ],
+   "status": "done",
+   "owner": "bugs",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/029-bug-002-003-status.md"
+  },
+  {
+   "id": "HW-044",
+   "title": "Sincronizar estados de cierre BUG-004/009",
+   "deps": [
+    "HW-043"
+   ],
+   "status": "done",
+   "owner": "bugs",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/030-bug-004-009-status.md"
+  },
+  {
+   "id": "HW-045",
+   "title": "Alinear estado vigente de BUG-007 DDraw ABI",
+   "deps": [
+    "HW-044"
+   ],
+   "status": "done",
+   "owner": "bugs",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/031-bug-007-status.md"
+  },
+  {
+   "id": "HW-046",
+   "title": "Alinear estado emulado vigente de BUG-005",
+   "deps": [
+    "HW-045"
+   ],
+   "status": "done",
+   "owner": "bugs",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/032-bug-005-status.md"
+  },
+  {
+   "id": "HW-047",
+   "title": "Reportar prerequisitos ausentes del oracle runtime qemu",
+   "deps": [],
+   "status": "done",
+   "owner": "runtime",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/033-runtime-qemu-prereqs.md"
+  },
+  {
+   "id": "HW-048",
+   "title": "Limpiar temporal remoto si falla RETR durante verificación SHA-256 del deploy",
+   "deps": [
+    "HW-032"
+   ],
+   "status": "done",
+   "owner": "luna",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/034-deploy-hash-retr-cleanup.md"
+  },
+  {
+   "id": "HW-049",
+   "title": "Limpiar temporal remoto si falla SIZE después de STOR en deploy",
+   "deps": [
+    "HW-048"
+   ],
+   "status": "done",
+   "owner": "luna",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/035-deploy-size-error-cleanup.md"
+  },
+  {
+   "id": "HW-050",
+   "title": "Registrar cada SetDisplayMode guest para diagnosticar la resolución baja reportada en consola",
+   "deps": [
+    "HW-010"
+   ],
+   "status": "done",
+   "owner": "render",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/036-ddraw-mode-telemetry.md"
+  },
+  {
+   "id": "HW-051",
+   "title": "Perfilador por muestreo del EIP guest (histograma por función con nombres Ghidra, % guest vs shims) en qemu/Vita3K/consola",
+   "deps": [],
+   "status": "in_progress",
+   "owner": "runtime",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/037-guest-eip-profile.md"
+  },
+  {
+   "id": "HW-052",
+   "title": "HLE: funciones guest calientes (>3% del perfil) reemplazadas por nativo ARM/NEON con test diferencial y flag",
+   "deps": [],
+   "status": "blocked",
+   "note": "Exacto y opt-in (HW_INTRIN/HW_HLE_TARGETS): spans (diferencial Unicorn), __ftol (sombra 16.5M), raster triángulo AOT (300 triángulos bit a bit). qemu: spans +3 %, ftol +2 %, AOT +2 % (qemu emula VFP: no mide float). Ganancia real lograda en el JIT: winx86-0006/0007/0008 (0008 −4.6 % qemu). Bloqueado: validación de rendimiento sólo en consola (CONSOLE_LOCKED). Ver docs/hle-prep.md.",
+   "owner": "opus",
+   "milestone": "M6",
+   "spec": "hotwheels/docs/perf-plan.md"
+  },
+  {
+   "id": "HW-053",
+   "title": "Pipeline: replay D3D/texturas/swap fuera del hilo guest en todos los modos (productor/consumidor, fences, afinidad core1)",
+   "deps": [],
+   "status": "done",
+   "owner": "render",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/037-d3d-producer-consumer.md"
+  },
+  {
+   "id": "HW-054",
+   "title": "x87: auditar caché de pila FPU de Box86 en bloques calientes; superbloques; precisión simple si FLDCW lo permite",
+   "deps": [],
+   "status": "in_progress",
+   "owner": "runtime",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/044-x87-stack-cache.md"
+  },
+  {
+   "id": "HW-055",
+   "title": "Caché de texturas por hash de contenido+paleta; medir uploads/frame",
+   "deps": [],
+   "status": "done",
+   "owner": "render",
+   "milestone": "M6",
+   "spec": "specs/038-texture-content-cache.md"
+  },
+  {
+   "id": "HW-056",
+   "title": "Busy-wait del timer (0x412df0): convertir espera activa QPC en sceKernelDelayThread cuando el guest va adelantado",
+   "deps": [],
+   "status": "done",
+   "note": "HW_QPC_IDLE_US (GuestClock::spin_idle_us → wx86_wait_sleep(1), libera GIL) + métrica qpc_calls/idles (4835664, c96302c). Vita3K: idle actúa sin colgar; sólo gana si el guest supera 40 Hz. Opt-in; validación consola pendiente.",
+   "owner": "opus",
+   "milestone": "M6",
+   "spec": "hotwheels/docs/perf-plan.md"
+  },
+  {
+   "id": "HW-060",
+   "title": "Vita3K runner: guardar sólo el delta de audio.log por corrida",
+   "deps": [],
+   "status": "done",
+   "owner": "integ",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/037-vita3k-audio-log-delta.md"
+  },
+  {
+   "id": "HW-061",
+   "title": "Vita3K runner: capturar progress.txt por corrida y permitir home aislado",
+   "deps": [
+    "HW-060"
+   ],
+   "status": "done",
+   "owner": "integ",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/038-vita3k-progress-delta.md"
+  },
+  {
+   "id": "HW-062",
+   "title": "Vita3K runner: aislar vita3k.log por corrida",
+   "deps": [
+    "HW-061"
+   ],
+   "status": "done",
+   "owner": "integ",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/039-vita3k-emulator-log-delta.md"
+  },
+  {
+   "id": "HW-057",
+   "title": "Extraer shims DirectX/WINMM/DINPUT/DSound de hotwheels/src a librería genérica reutilizable (shared/winx86-dx o similar) con interfaz por juego (config) y tests; hotwheels pasa a consumirla sin regresiones",
+   "deps": [],
+   "status": "done",
+   "owner": "dxlib",
+   "milestone": "M7",
+   "spec": "hotwheels/specs/030-winx86-dx-lib.md"
+  },
+  {
+   "id": "HW-059",
+   "title": "Caché de traducción persistente en winx86 (bloques traducidos a disco, invalidación por hash del exe/versión del traductor) + optimización guiada por perfil",
+   "deps": [
+    "HW-051"
+   ],
+   "status": "in_progress",
+   "owner": "runtime",
+   "milestone": "M7",
+   "spec": "hotwheels/specs/045-persistent-translation-cache.md"
+  },
+  {
+   "id": "HW-063",
+   "title": "Pipeline D3D: preservar TexUpload/TexFree al descartar READY para que Draws sobrevivientes vean texturas correctas",
+   "deps": [
+    "HW-053"
+   ],
+   "status": "done",
+   "owner": "render",
+   "milestone": "M6",
+   "spec": "specs/040-d3d-drop-resource-state.md"
+  },
+  {
+   "id": "HW-064",
+   "title": "USER32 PeekMessage idle opt-in para reducir sondeo vacío en menú/carga",
+   "deps": [
+    "HW-057"
+   ],
+   "status": "done",
+   "owner": "dxlib",
+   "milestone": "M7",
+   "spec": "specs/041-peekmessage-idle.md"
+  },
+  {
+   "id": "HW-065",
+   "title": "Cachear habilitación de atributos del vertex shader D3D en vitaGL",
+   "deps": [
+    "HW-063"
+   ],
+   "status": "done",
+   "owner": "render",
+   "milestone": "M7",
+   "spec": "specs/042-vitagl-vertex-attrib-cache.md"
+  },
+  {
+   "id": "HW-066",
+   "title": "Interp60: recuperar correspondencias espaciales con draw insert/delete sin cruzar painter order ni HUD",
+   "deps": [
+    "HW-025",
+    "HW-031"
+   ],
+   "status": "done",
+   "owner": "luna",
+   "milestone": "M7",
+   "spec": "specs/043-interp60-matching-recall.md"
+  },
+  {
+   "id": "HW-067",
+   "title": "Oráculo de render por pista: guion por pista + captura del mismo frame en Wine x86 / qemu RefRaster / Vita3K GXP y diff, para clasificar BUG-047 (backend vs pipeline vs runtime)",
+   "deps": [],
+   "status": "review",
+   "owner": "opus-gfx",
+   "milestone": "M8",
+   "spec": "hotwheels/specs/046-oraculo-render-por-pista.md"
+  },
+  {
+   "id": "HW-068",
+   "title": "Corregir glitches geométricos y de textura de BUG-047 en todas las pistas no-playa (diff vs referencia bajo umbral en cada pista)",
+   "deps": [
+    "HW-067"
+   ],
+   "status": "in_progress",
+   "owner": "cc-gfx",
+   "milestone": "M8",
+   "spec": "hotwheels/specs/047-fix-glitches-pistas.md"
+  },
+  {
+   "id": "HW-069",
+   "title": "Audio limpio: oráculo offline de DSound (captura de llamadas guest + mezcla referencia vs ds_emul) y fix de BUG-031",
+   "deps": [],
+   "status": "review",
+   "owner": "fix-luna",
+   "milestone": "M8",
+   "spec": "hotwheels/specs/048-oraculo-audio-dsound.md"
+  },
+  {
+   "id": "HW-070",
+   "title": "Nitidez de carrera: medir resolución efectiva y cadena de escalado/filtro en consola y llevar la carrera a imagen nítida (BUG-032)",
+   "deps": [],
+   "status": "review",
+   "owner": "fix-luna",
+   "milestone": "M8",
+   "spec": "hotwheels/specs/049-nitidez-carrera.md"
+  },
+  {
+   "id": "HW-071",
+   "title": "RE asistida: REA + Ghidra 12.1.4 sobre el exe, proyecto con nombres existentes, soporte a HW-067..070",
+   "deps": [],
+   "status": "in_progress",
+   "owner": "rea-re",
+   "milestone": "M8",
+   "spec": "hotwheels/specs/050-rea-ghidra12.md"
+  },
+  {
+   "id": "HW-072",
+   "title": "Perf CPU guest: medir y atacar el top del perfil EIP (x87, timer busy-wait, HLE candidatos, bloques dynarec calientes) con A/B medido; preparar VPK de medición de fps para consola",
+   "deps": [],
+   "status": "in_progress",
+   "owner": "perf-cpu",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/053-perf-cpu-guest.md"
+  },
+  {
+   "id": "HW-073",
+   "title": "Perf host: costo del consumer D3D/vitaGL, threads/afinidad/GIL, audio (resampler sinc) en Cortex-A9; presupuesto por frame y A/B medido",
+   "deps": [],
+   "status": "in_progress",
+   "owner": "perf-host",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/054-perf-host.md"
+  },
+  {
+   "id": "HW-074",
+   "title": "Worker remoto (PC del usuario, WSL+Docker): remote_run.sh con slots propios y retorno de corridas",
+   "deps": [],
+   "status": "review",
+   "owner": "worker",
+   "milestone": "M8",
+   "spec": "hotwheels/specs/051-worker-remoto.md"
+  },
+  {
+   "id": "HW-075",
+   "title": "Paralelismo Vita: verificar los tres cores de usuario y descargar trabajo serial del guest con A/B de carrera en consola",
+   "deps": [
+    "HW-053"
+   ],
+   "status": "in_progress",
+   "owner": "sol-cores",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/064-paralelismo-vita.md",
+   "measurement": "Antes/después en la misma pista/config/build identificados: guest Hz mediana/p95 frame time, CPU por hilo/core, replay/wait y underruns; sin regresión visual ni semántica."
+  },
+  {
+   "id": "HW-076",
+   "title": "Packaging Vita: icono y portada LiveArea desde originales locales del usuario, sin assets del juego versionados",
+   "deps": [
+    "HW-017"
+   ],
+   "status": "in_progress",
+   "owner": "sol-cores",
+   "milestone": "M6",
+   "spec": "hotwheels/specs/065-icono-portada-vita.md",
+   "acceptance": "Generador/test verifican formatos, dimensiones y referencias LiveArea; VPK separado con eboot SHA256 idéntico al de entrada; fuentes/assets generados ignorados por Git; review aprobado. Sin deploy durante OFFICE."
+  }
+ ]
+}

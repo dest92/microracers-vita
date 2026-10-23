@@ -1,0 +1,19 @@
+diff --git a/third_party/box86-dynarec/dynarec/dynarec_arm_66.c b/third_party/box86-dynarec/dynarec/dynarec_arm_66.c
+index 5049656..ebf1e44 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec_arm_66.c
++++ b/third_party/box86-dynarec/dynarec/dynarec_arm_66.c
+@@ -638,12 +638,12 @@ uintptr_t dynarec66(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
+         case 0x9C:
+             INST_NAME("PUSHF (16b)");
+             READFLAGS(X_ALL);
+-            STRHB_IMM8(xFlags, xESP, -2);
++            MMU_PUSH16(xFlags, x2);
+             break;
+         case 0x9D:
+             INST_NAME("POPF (16b)");
+             SETFLAGS(X_ALL, SF_SET_NODF);    // lower 16bits is all flags handled in dynarec
+-            LDRHA_IMM8(x2, xESP, 2);
++            MMU_POP16(x2, x1);
+             MOV32(x1, 0x7FD7);
+             AND_REG_LSL_IMM5(x2, x2, x1, 0);
+             ORR_IMM8(x2, x2, 2, 0);

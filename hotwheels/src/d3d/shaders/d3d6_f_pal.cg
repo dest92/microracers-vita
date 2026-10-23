@@ -1,0 +1,18 @@
+float4 main(
+  float2 vTex : TEXCOORD0,
+  float4 vCol : COLOR0,
+  float  vPal : TEXCOORD1,
+  uniform sampler2D uPage : TEXUNIT0,
+  uniform sampler2D uPalette : TEXUNIT1,
+  uniform float4 uConst,
+  uniform float4 uMode,
+  uniform float4 uKey) : COLOR
+{
+  float idx = tex2D(uPage, vTex).x;
+  float4 texel = tex2D(uPalette,
+                       float2(idx * 0.99609375f + 0.001953125f, vPal));
+  float d = abs(texel.x - uKey.x) + abs(texel.y - uKey.y) + abs(texel.z - uKey.z);
+  if (uMode.y > 0.5f && d < 0.002f) discard;
+  float3 rgb = lerp(uConst.xyz, texel.xyz * vCol.xyz, uMode.x);
+  return float4(rgb.x, rgb.y, rgb.z, uConst.w * uMode.z);
+}

@@ -1,0 +1,148 @@
+diff --git a/src/dynarec86/dyn86.c b/src/dynarec86/dyn86.c
+index ac4f299..fd07b9b 100644
+--- a/src/dynarec86/dyn86.c
++++ b/src/dynarec86/dyn86.c
+@@ -84,6 +84,35 @@ uint64_t dyn86_jp_epoch_us = 0;
+ uint64_t dyn86_jp_clock_bias_ns = 0;
+ uint64_t dyn86_jp_run_us = 0;
+ 
++/* HW-051: one serialized dynarec publishes a best-effort current guest EIP. */
++static volatile uint32_t guestprof_enabled;
++static volatile uint32_t guestprof_state;
++static volatile uint32_t* guestprof_curblk;
++int box86_dynarec_pcsamp = 0;
++void dyn86_guestprof_enable(int on) {
++    if (on) {
++        __atomic_store_n(&guestprof_state, 0u, __ATOMIC_RELAXED);
++        box86_dynarec_pcsamp = 1;
++        __atomic_store_n(&guestprof_enabled, 1u, __ATOMIC_RELAXED);
++    } else {
++        __atomic_store_n(&guestprof_enabled, 0u, __ATOMIC_RELAXED);
++        __atomic_store_n(&guestprof_state, 0u, __ATOMIC_RELAXED);
++        box86_dynarec_pcsamp = 0;
++    }
++}
++void dyn86_guestprof_set_state(uint32_t state) {
++    if (__atomic_load_n(&guestprof_enabled, __ATOMIC_RELAXED))
++        __atomic_store_n(&guestprof_state, state, __ATOMIC_RELAXED);
++}
++void dyn86_guestprof_bind_curblk(volatile uint32_t* slot) {
++    __atomic_store_n(&guestprof_curblk, slot, __ATOMIC_RELAXED);
++}
++uint32_t dyn86_guestprof_read_state(void) { return __atomic_load_n(&guestprof_state, __ATOMIC_RELAXED); }
++uint32_t dyn86_guestprof_read_eip(void) {
++    volatile uint32_t* slot = __atomic_load_n(&guestprof_curblk, __ATOMIC_RELAXED);
++    return slot ? __atomic_load_n(slot, __ATOMIC_RELAXED) : 0;
++}
++
+ static uint64_t jp_now_ns(void)
+ {
+     struct timespec ts;
+diff --git a/src/dynarec86/dyn86.h b/src/dynarec86/dyn86.h
+index 26f5e8f..d7f6258 100644
+--- a/src/dynarec86/dyn86.h
++++ b/src/dynarec86/dyn86.h
+@@ -57,6 +57,13 @@ void dyn86_dump_eipring(void);
+  * init_custommem_helper() and before any translation. */
+ void dyn86_init(void);
+ 
++/* HW-051: opt-in, low-frequency EIP sampler interface. State: 0 idle, 1 translated guest, 2 native shim. */
++void dyn86_guestprof_enable(int on);
++void dyn86_guestprof_set_state(uint32_t state);
++void dyn86_guestprof_bind_curblk(volatile uint32_t* slot);
++uint32_t dyn86_guestprof_read_state(void);
++uint32_t dyn86_guestprof_read_eip(void);
++
+ /* --- D2_JITPROFILE: dynarec cost profile (opt-in, docs/perf/jitprofile.md) ---
+  *
+  * Armed ONCE in dyn86_init() from the environment. When it is 0 every counter
+diff --git a/src/runtime/cpu_box86.cpp b/src/runtime/cpu_box86.cpp
+index 1a625ca..de81e50 100644
+--- a/src/runtime/cpu_box86.cpp
++++ b/src/runtime/cpu_box86.cpp
+@@ -1441,7 +1441,9 @@ public:
+         for (;;) {
+             EMU().quit = 0;
+             const uint32_t start = EMU().ip.dword[0];
++            dyn86_guestprof_set_state(1);
+             DynaRun(&EMU());
++            dyn86_guestprof_set_state(0);
+             uint32_t ip = EMU().ip.dword[0];
+             // Block-budget expiry: preempted, exactly resumable at EIP =
+             // the start of the block that was about to run.
+@@ -1496,8 +1498,14 @@ public:
+                 // information.
+                 if (g_noEmuOpt) t_fault_addr = slot;   // per-trap write RESTORED (rollback path)
+                 EMU().ip.dword[0] = slot;      // consistent state, like CpuUnicorn
+-                if (try_intrinsic(slot)) continue;   // fast path: never enters the Bridge
++                dyn86_guestprof_set_state(2);
++                const bool intrinsic = try_intrinsic(slot);
++                if (intrinsic) {
++                    dyn86_guestprof_set_state(0);
++                    continue;   // fast path: never enters the Bridge
++                }
+                 bool resume = trap_fn_(*this, slot);
++                dyn86_guestprof_set_state(0);
+                 if (!resume) return true;  // sentinel: clean finish
+                 continue;                  // resume at handler-set EIP
+             }
+diff --git a/third_party/box86-dynarec/dynarec/dynarec.c b/third_party/box86-dynarec/dynarec/dynarec.c
+index 79a34af..7e827b6 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec.c
++++ b/third_party/box86-dynarec/dynarec/dynarec.c
+@@ -26,6 +26,7 @@ void x86test_check(x86emu_t* ref, uintptr_t ip);
+ 
+ // D2Vita preemption seam (implemented in src/dynarec86/dyn86.c)
+ extern int dyn86_should_break(void);
++extern void dyn86_guestprof_bind_curblk(volatile uint32_t* slot);
+ // D2Vita (lot eviction JIT) : compteurs partages, definis dans custommem.c et
+ // dynablock.c — voir le commentaire au site d'incrementation plus bas.
+ extern uint32_t dyn86_jit_allocfail;
+@@ -309,6 +310,7 @@ void DynaCall(x86emu_t* emu, uintptr_t addr)
+ int my_setcontext(x86emu_t* emu, void* ucp);
+ int DynaRun(x86emu_t* emu)
+ {
++    dyn86_guestprof_bind_curblk(&emu->dyn86_curblk);
+     /* D2Vita (lot eviction JIT) — MARQUE DE GRACE, entree.
+      * « Ce fil est dans du code traduit » est exactement « ce fil est dans une
+      * activation de DynaRun » : un trap fait SORTIR DynaRun (le shim est
+diff --git a/third_party/box86-dynarec/dynarec/dynarec_arm_pass.c b/third_party/box86-dynarec/dynarec/dynarec_arm_pass.c
+index 25b335c..76a021c 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec_arm_pass.c
++++ b/third_party/box86-dynarec/dynarec/dynarec_arm_pass.c
+@@ -26,6 +26,7 @@ extern unsigned long dyn86_nopend_dropped, dyn86_nopend_kept, dyn86_nopend_seen;
+ #include "dynarec_arm_helper.h"
+ #include "dyn86_memfast.h"     /* D2Vita : chemin court EN LIGNE (D2_MEMINTRIN=3) */
+ #include "custommem.h"
++extern int box86_dynarec_pcsamp;
+ #include "elfloader.h"
+ 
+ #ifndef STEP
+@@ -242,6 +243,14 @@ uintptr_t arm_pass(dynarec_arm_t* dyn, uintptr_t addr)
+         }
+         D2EP_ACC(prolog, D2EP_S_PROLOG);
+     }
++    // HW-051: publish the current guest block in the per-EMU slot. The knob is
++    // fixed before translation; pass 2 and pass 3 therefore emit equal sizes.
++    if(box86_dynarec_pcsamp) {
++        _Static_assert(offsetof(x86emu_t, dyn86_curblk) < 4096,
++                       "curblk must be STR_IMM9-addressable from xEmu");
++        MOV32_(x1, init_addr);
++        STR_IMM9(x1, xEmu, offsetof(x86emu_t, dyn86_curblk));
++    }
+     // ---- D2Vita : memcpy/memset du CRT servis SANS TRAP (D2_MEMINTRIN) -----
+     // Contrat complet, mesure et garde-fous : src/dynarec86/dyn86_memintrin.h.
+     // Le bloc qui COMMENCE a l'entree de memcpy/memset appelle un helper C
+diff --git a/third_party/box86-dynarec/emu/x86emu_private.h b/third_party/box86-dynarec/emu/x86emu_private.h
+index 77ced0d..b56e1d0 100755
+--- a/third_party/box86-dynarec/emu/x86emu_private.h
++++ b/third_party/box86-dynarec/emu/x86emu_private.h
+@@ -172,6 +172,8 @@ typedef struct x86emu_s {
+      * DBGetBlock de sa boucle de reessai tout de suite, pour aller chercher la
+      * sortie reprenable de DynaRun qui, elle, debloquera la vague. */
+     uint32_t    dyn86_evwait;
++    /* HW-051: guest address last entered; aligned single-word write by JIT. */
++    uint32_t    dyn86_curblk;
+ } x86emu_t;
+ 
+ #define EMUTYPE_NONE    0

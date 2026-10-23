@@ -1,0 +1,187 @@
+diff --git a/src/runtime/ds_emul.cpp b/src/runtime/ds_emul.cpp
+index f0cfd5c..699c083 100644
+--- a/src/runtime/ds_emul.cpp
++++ b/src/runtime/ds_emul.cpp
+@@ -9,6 +9,7 @@
+ #include "runtime/cpu.h"
+ #include "runtime/gil.h"
+ #include "runtime/host_clock.h"
++#include "runtime/ds_resample.h"
+ 
+ #include <cstdio>
+ #include <cstring>
+@@ -55,7 +56,8 @@ struct Voice {
+     uint64_t posAcc = 0;         // resampling remainder
+     uint32_t flags = 0;
+     int      ch = 2, bits = 16;
+-    uint32_t rate = kRate;
++    uint32_t rate = kRate;       // playback rate (SetFrequency)
++    uint32_t fmtRate = kRate;    // format rate (SetFrequency(0) restores it)
+     uint32_t blockAlign = 4;
+     bool     primary = false;
+     bool     playing = false, looping = false;
+@@ -293,38 +295,10 @@ void mix_grain(Cpu* c, int frames) {
+     std::memset(g_acc, 0, sizeof(int32_t) * (size_t)ns);
+     for (const Snap& s : g_snap) {
+         if (!s.blockAlign) continue;
+-        // Actual read width, distinct from blockAlign: a buffer whose
+-        // nBlockAlign lies (or whose length isn't a multiple of it) would
+-        // read 2 or 4 bytes past the end of the host view. The advance step
+-        // stays blockAlign — that's the DirectSound contract — the guard is
+-        // only on the read.
+-        const uint32_t width = (s.ch == 2) ? 4u : 2u;
+-        if (s.len < width) continue;
+-        uint32_t pos = s.cur % s.len;
+-        if (pos + width > s.len) pos = 0;
+-        uint64_t acc = s.acc;
+-        bool done = false;
+-        for (int i = 0; i < frames && !done; i++) {
+-            if (s.ch == 2) {
+-                int16_t l, r; std::memcpy(&l, s.host + pos, 2); std::memcpy(&r, s.host + pos + 2, 2);
+-                g_acc[2*i]   += (int32_t)(((int64_t)l * (int64_t)s.gL) >> 16);
+-                g_acc[2*i+1] += (int32_t)(((int64_t)r * (int64_t)s.gR) >> 16);
+-            } else {
+-                int16_t v; std::memcpy(&v, s.host + pos, 2);
+-                g_acc[2*i]   += (int32_t)(((int64_t)v * (int64_t)s.gL) >> 16);
+-                g_acc[2*i+1] += (int32_t)(((int64_t)v * (int64_t)s.gR) >> 16);
+-            }
+-            // Advances by rate/kRate, exact integer arithmetic (no drift).
+-            acc += s.rate;
+-            while (acc >= (uint64_t)kRate) {
+-                acc -= (uint64_t)kRate;
+-                pos += s.blockAlign;
+-                if (pos + width > s.len) {                 // end of buffer
+-                    if (s.loop) { pos = 0; }
+-                    else { done = true; break; }           // one-shot voice: SILENCE
+-                }
+-            }
+-        }
++        // Linear interpolation, phase carried across grains; the read-width
++        // guard against a lying nBlockAlign lives there too (ds_resample.h).
++        ResampleVoice rv{s.host, s.len, s.cur, s.blockAlign, s.rate, s.acc, s.ch, s.gL, s.gR, s.loop};
++        mix_voice(rv, (uint32_t)kRate, frames, g_acc);
+     }
+     for (int k = 0; k < ns; k++) {
+         int32_t v = g_acc[k];
+@@ -522,7 +496,7 @@ uint32_t m_ds_duplicate(Cpu& c) {
+     // resurface this buffer.
+     d.obj = obj; d.buf = o->buf; d.host = o->host; d.cap = 0; d.ownsBuf = false;
+     d.len = o->len; d.flags = o->flags;
+-    d.ch = o->ch; d.bits = o->bits; d.rate = o->rate; d.blockAlign = o->blockAlign;
++    d.ch = o->ch; d.bits = o->bits; d.rate = o->rate; d.fmtRate = o->fmtRate; d.blockAlign = o->blockAlign;
+     d.primary = false; d.alive = true;
+     // Independent playback state — that's the whole point of a duplicate.
+     d.cursor = 0; d.posAcc = 0; d.playing = false; d.looping = false;
+@@ -610,7 +584,7 @@ uint32_t m_ds_createbuffer(Cpu& c) {
+     }
+     Voice& v = g_voices[idx];
+     v.len = bytes; v.cursor = 0; v.posAcc = 0; v.flags = flags;
+-    v.ch = ch; v.bits = bits; v.rate = rate; v.blockAlign = blockAlign;
++    v.ch = ch; v.bits = bits; v.rate = rate; v.fmtRate = rate; v.blockAlign = blockAlign;
+     v.primary = primary; v.playing = false; v.looping = false; v.alive = true;
+     v.volmB = 0; v.panmB = 0; v.refs = 1; v.lockKio = 0; v.volSaid = false; recompute_gains(v);
+     // A reused slot always comes from g_freeVoices, i.e. an owner with no
+@@ -619,8 +593,7 @@ uint32_t m_ds_createbuffer(Cpu& c) {
+     v.ownsBuf = true; v.shares = 0; v.owner = (size_t)-1;
+     v.host = (const uint8_t*)c.hostptr(v.buf, v.len);
+     if (rate != (uint32_t)kRate) {
+-        // The mixer resamples via nearest-neighbor (no interpolation): pitch
+-        // is correct, but audio quality is reduced accordingly.
++        // The mixer resamples with linear interpolation (ds_resample.h).
+         static bool cried = false;
+         if (!cried) { cried = true;
+             jpline("[son] tampon a %u Hz (attendu %d) : REECHANTILLONNAGE actif"
+@@ -692,8 +665,8 @@ uint32_t m_buf_getformat(Cpu& c) {
+     if (v && p && sz >= 18) {
+         uint32_t w[5];
+         w[0] = 1u | ((uint32_t)v->ch << 16);
+-        w[1] = v->rate;
+-        w[2] = v->rate * v->blockAlign;
++        w[1] = v->fmtRate;
++        w[2] = v->fmtRate * v->blockAlign;
+         w[3] = v->blockAlign | (16u << 16);
+         w[4] = 0;
+         c.write(p, w, 18);
+@@ -784,7 +757,7 @@ uint32_t m_buf_setformat(Cpu& c) {
+     if (!v || !pwfx) return DSERR_INVALIDPARAM;
+     uint32_t w0 = c.read_u32(pwfx), w3 = c.read_u32(pwfx + 12);
+     int ch = (int)(w0 >> 16); if (ch >= 1 && ch <= 2) v->ch = ch;
+-    uint32_t r = c.read_u32(pwfx + 4); if (r) v->rate = r;
++    uint32_t r = c.read_u32(pwfx + 4); if (r) v->rate = v->fmtRate = r;
+     uint32_t ba = w3 & 0xffffu; v->blockAlign = ba ? ba : (uint32_t)v->ch * 2u;
+     return DS_OK;
+ }
+@@ -822,7 +795,8 @@ uint32_t m_buf_setfreq(Cpu& c) {
+     if (Voice* v = voice_of(c, c.arg(0))) {
+         uint32_t f = c.arg(1);
+         // DSBFREQUENCY_ORIGINAL == 0: revert to the format's frequency.
+-        if (f && f != v->rate) {
++        if (!f) f = v->fmtRate;
++        if (f != v->rate) {
+             v->rate = f;
+             static bool cried = false;
+             if (!cried) { cried = true;
+diff --git a/src/runtime/ds_resample.h b/src/runtime/ds_resample.h
+new file mode 100644
+index 0000000..f5acec0
+--- /dev/null
++++ b/src/runtime/ds_resample.h
+@@ -0,0 +1,58 @@
++// ds_resample.h — per-voice mix step of ds_emul, kept pure (no Cpu, no locks)
++// so it can be tested on the host.
++//
++// The read position advances by rate/out_rate with exact integer arithmetic
++// (`acc` is the fractional remainder in units of 1/out_rate), the same as the
++// voice cursor in ds_emul, so mix position and cursor never drift apart.
++// Samples are linearly interpolated between the current frame and the next
++// one using that same remainder. At rate == out_rate the remainder stays zero
++// and output is sample-for-sample identical to the source. The phase
++// (pos, acc) carries across calls, so a SetFrequency between grains changes
++// the step without a discontinuity.
++#pragma once
++#include <cstdint>
++#include <cstring>
++
++namespace d2rt { namespace dsound {
++
++struct ResampleVoice {
++    const uint8_t* host; uint32_t len, pos, blockAlign, rate;
++    uint64_t acc; int ch; uint32_t gL, gR; bool loop;
++};
++
++// Mixes `frames` stereo output frames into out[2*frames]. Returns false once a
++// one-shot voice runs past its end (the rest of the grain stays silent).
++inline bool mix_voice(ResampleVoice& v, uint32_t out_rate, int frames, int32_t* out) {
++    const uint32_t width = (v.ch == 2) ? 4u : 2u;
++    if (!v.blockAlign || v.len < width || !out_rate) return false;
++    if (v.pos % v.len + width > v.len) v.pos = 0; else v.pos %= v.len;
++    // Q16 fraction from a reciprocal computed once per call: the Cortex-A9 has
++    // no integer divider, so no division per sample.
++    const uint64_t inv = (1ull << 32) / out_rate;
++    auto rd = [&](uint32_t p, int k) { int16_t s; std::memcpy(&s, v.host + p + 2 * k, 2); return (int32_t)s; };
++    for (int i = 0; i < frames; i++) {
++        uint32_t np = v.pos + v.blockAlign;
++        if (np + width > v.len) np = v.loop ? 0 : v.pos;   // one-shot end: hold the last frame
++        const int64_t f = (int64_t)((v.acc * inv) >> 16);   // acc/out_rate in Q16
++        int32_t l0 = rd(v.pos, 0), r0 = (v.ch == 2) ? rd(v.pos, 1) : l0;
++        if (f) {
++            const int32_t l1 = rd(np, 0), r1 = (v.ch == 2) ? rd(np, 1) : l1;
++            l0 += (int32_t)(((int64_t)(l1 - l0) * f) >> 16);
++            r0 += (int32_t)(((int64_t)(r1 - r0) * f) >> 16);
++        }
++        out[2 * i]     += (int32_t)(((int64_t)l0 * (int64_t)v.gL) >> 16);
++        out[2 * i + 1] += (int32_t)(((int64_t)r0 * (int64_t)v.gR) >> 16);
++        v.acc += v.rate;
++        while (v.acc >= out_rate) {
++            v.acc -= out_rate;
++            v.pos += v.blockAlign;
++            if (v.pos + width > v.len) {
++                if (v.loop) v.pos = 0;
++                else return false;
++            }
++        }
++    }
++    return true;
++}
++
++}}  // namespace d2rt::dsound

@@ -1,0 +1,8 @@
+float4 main(
+  float2 vTex : TEXCOORD0,
+  float4 vCol : COLOR0,
+  float  vPal : TEXCOORD1,
+  uniform sampler2D uPage : TEXUNIT0) : COLOR
+{
+  return tex2D(uPage, vTex);
+}

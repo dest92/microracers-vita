@@ -1,0 +1,24 @@
+# Parches locales a winx86
+
+winx86 vive en `d2vita/D2Vita/third_party/winx86`, que tiene su propio git: **no se commitea ahí**.
+Cada cambio que hotwheels necesita del motor es mínimo y aditivo, se aplica en ese árbol y se
+guarda como diff en `hotwheels/patches/`. Antes de compilar en un checkout limpio:
+`git -C d2vita/D2Vita/third_party/winx86 apply ../../../../hotwheels/patches/winx86-*.patch`.
+
+| parche | archivo | qué hace | por qué | verificación |
+|---|---|---|---|---|
+| `winx86-0001-stack_top.patch` | `src/runtime/bridge.h` | agrega `uint32_t Bridge::stack_top() const` (= `stack_base_ + stack_size_`) | `hw::boot_to_entry` necesita el tope de la pila principal; antes duplicaba el default privado 0x60200000 y fallaba con `D2LAYOUT`/`WX86_STACKBASE` (reviews e5c4463, HW-005) | test host hotwheels verde; `TARGET=vita build.sh` de winx86 OK (167 unidades); `tools/build_rt_boot_vpk.sh` de D2Vita OK con `D2VPK_OUT` en scratchpad (2026-10-02) |
+
+Autorizado por el orquestador (2026-10-02). Candidato a proponer upstream a winx86.
+
+`winx86-0002-pushfw-fastmmu.patch` corrige `pushfw`/`popfw` de 16 bits en el dynarec ARM: usa `MMU_PUSH16`/`MMU_POP16` para traducir ESP guest. Evidencia: qemu-arm antes SIGSEGV en 0x42329d (pushfw), después 85 PNG en la corrida `out/run-20261003-000745`.
+
+| `winx86-0003-pmu-profile.patch` | `src/runtime/pmu_metrics.h`, `src/runtime/sched_native.{h,cpp}`, `third_party/box86-dynarec/dynarec/dynarec.c` | Instrumentación PMU Cortex-A9 opt-in por runner, ventana <=500 ms, métricas de hilo/GIL y muestreo 1/64 de `DBGetBlock`; sin CP15 cuando `HW_PMU` está apagado | HW-033 requiere baseline de menú/carrera en consola; knobs no cambian defaults | prueba host `test_runtime_pmu`, build Vita winx86, VPK Hot Wheels y build/link/VPK D2Vita aislados PASS; consola sin log fresco, pendiente |
+
+| `winx86-0004-chain-ab.patch` | runtime dynarec | Agrega el knob `WX86_CHAIN=0/1` para comparar funnel y encadenamiento directo | HW-034: A/B sin cambiar default | A/B qemu y Vita3K resumido en `FINDINGS.md` |
+| `winx86-0005-guest-eip-profile.patch` | `src/dynarec86/dyn86.{c,h}`, `src/runtime/cpu_box86.cpp`, dynarec Box86 | Publica EIP/status por atomics cuando `HW_GUEST_PROFILE=1`; el muestreador lee sin tocar registros ni GIL | HW-051: distribución por función con overhead acotado | test host; build Vita de winx86 167 unidades PASS en worktree aislado; PC host QEMU menú/carrera consolidado en `docs/guest-profile.md`; Vita3K pendiente |
+| `winx86-0006-fist64-fast.patch` | dynarec Box86 `dynarec_arm_functions.c` (`arm_fist64_{0..3}`) | FISTP m64: si el valor cabe en int32, `VCVT.S32.F64` en vez de `__aeabi_d2lz` (soft-float) | HW-052/perf: `__ftol` del juego; ~10 % del CPU qemu en d2lz+fist64 | `tests/test_fist64_fast.c` 8 M casos PASS; qemu neutro (VFP emulado por TCG); validar con PMU en consola |
+| `winx86-0007-div32-fast.patch` | Box86 `emu/x86primop.c` (`div32`/`idiv32`) | Dividendo que cabe en 32 bits → una división de 32 bits (A9 sin división hardware; antes 64 bits, `div32` dos veces). EAX=INT32_MIN queda en camino original | perf: `__udivmoddi4` 4 % en perfil PC qemu | `tests/test_div32_fast.c` 3 M casos PASS; qemu neutro dentro del ruido; validar en consola. A/B qemu 0006+0007 (ab_cpu_frame.sh, 3 pares): B ≤ A en los 3 pares (−1.7/−12.8/−29 %, carga alta), favorable no concluyente. Halló bug latente de Box86: `idiv32` rechaza cociente −2³¹ con #DE |
+| `winx86-0008-fistp64-inline.patch` | dynarec Box86 `dynarec_arm_df.c` (FISTP m64) | Camino inline para RC=truncar (`__ftol`): VCVT.S32.F64 + NaN/saturación → helper; evita la llamada a `arm_fist64_3` | perfil fiel HW-051: llamada ~6 % del hilo guest en carrera | sombra HW_FTOL_CHECK: 18.73 M comparaciones, 0 discrepancias; A/B qemu mediana −4.6 % CPU/frame (3 pares) |
+| `winx86-0008-idiv32-min-quotient.patch` | Box86 `emu/x86primop.c` (`idiv32`) | Usa rango inclusivo `INT32_MIN..INT32_MAX`; arma EDX:EAX con extensión signed sin shift signed UB | Corrige #DE incorrecto para −2³¹ / 1 detectado al revisar 0007 | `tests/test_idiv32_box86.sh` reproduce el fallo en 0007 y pasa con 0008; mantiene #DE divisor cero; test diferencial 3.001.728 casos PASS (host) |
+| `winx86-0012-ds-linear-resample.patch` | `src/runtime/ds_emul.cpp`, nuevo `src/runtime/ds_resample.h` | Mezcla por voz extraída a función pura; re-muestreo con interpolación lineal (fracción Q16 con recíproco por grano, sin división por muestra) en vez de vecino más cercano; `SetFrequency(0)` restaura la frecuencia del formato; `GetFormat` devuelve la del formato | Audio "raro" en carrera con métricas perfectas: el motor (SetFrequency continuo) sonaba con escalones/zumbido por retención de orden cero | `tests/test_ds_resample.cpp`: identidad a 22050 Hz, interpolación, SetFrequency cada 25 ms sin clicks y one-shot. Mutantes: vecino más cercano → 2 FALLAS (salto 3000 > cota 2046); reset de fase → FALLA (salto 11972). Build Vita OK; oído en consola pendiente |

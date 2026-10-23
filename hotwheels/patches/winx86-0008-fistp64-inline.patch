@@ -1,0 +1,31 @@
+diff --git a/third_party/box86-dynarec/dynarec/dynarec_arm_df.c b/third_party/box86-dynarec/dynarec/dynarec_arm_df.c
+index e00f2ca..5f538dc 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec_arm_df.c
++++ b/third_party/box86-dynarec/dynarec/dynarec_arm_df.c
+@@ -391,6 +391,26 @@ uintptr_t dynarecDF(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
+                         LDRD_IMM8(x2, x14, offsetof(fpu_ll_t, sq));  // load ll
+                         B_MARK3(c__);
+                         MARK;
++                        // hotwheels winx86-0008: camino inline para RC=truncar (el
++                        // __ftol de MSVC). Perfil fiel HW-051: la llamada a
++                        // arm_fist64_3 era ~6 % del hilo guest en carrera. VCVT
++                        // trunca hacia cero (== trunc) y satura: NaN, saturación o
++                        // ±2^31 caen al helper (mismo resultado que antes).
++                        LDRH_IMM8(x14, xEmu, offsetof(x86emu_t, cw));
++                        UBFX(x2, x14, 10, 2);
++                        CMPS_IMM8(x2, 3);
++                        B_MARK2(cNE);                       // otro modo de redondeo → helper
++                        VCMP_F64(v1, v1);
++                        VMRS_APSR();
++                        B_MARK2(cVS);                       // NaN → helper
++                        VCVT_S32_F64(v2*2, v1);
++                        VMOVfrV(x2, v2*2);
++                        MOV_REG_ASR_IMM5(x3, x2, 31);       // parte alta = extensión de signo
++                        XOR_REG_LSL_IMM5(x14, x2, x3, 0);   // 0x7fffffff si saturó (o es ±2^31-1/-2^31)
++                        ADDS_IMM8(x14, x14, 1);
++                        B_MARK2(cVS);                       // saturado → helper
++                        B_MARK3(c__);
++                        MARK2;
+                         // load round mode
+                         LDRH_IMM8(x14, xEmu, offsetof(x86emu_t, cw));    // hopefully cw is not too far for an imm8
+                         UBFX(x2, x14, 10, 2);    // extract round...

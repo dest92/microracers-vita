@@ -1,0 +1,174 @@
+diff --git a/Makefile b/Makefile
+index 62c532f..b63ed7a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -16,6 +16,20 @@ CFLAGS  = -g -Wl,-q -O3 -ffast-math -mtune=cortex-a9 -mfpu=neon -Wno-incompatibl
+ 	-DVGL_GIT_HASH='"$(shell git rev-parse --short HEAD)"' -Isource
+ ASFLAGS = $(CFLAGS)
+ 
++# SPEC-052 (HW-068): variante del build de diagnóstico (V0/V1/V2). Se traduce a número para
++# la línea "[hw] diag" (vgl_diag_variant). El valor por defecto (sin definir) es V0.
++ifneq ($(VGL_DIAG_VARIANT),)
++ifeq ($(VGL_DIAG_VARIANT),V0)
++CFLAGS += -DVGL_DIAG_VARIANT=0
++else ifeq ($(VGL_DIAG_VARIANT),V1)
++CFLAGS += -DVGL_DIAG_VARIANT=1
++else ifeq ($(VGL_DIAG_VARIANT),V2)
++CFLAGS += -DVGL_DIAG_VARIANT=2
++else
++$(error VGL_DIAG_VARIANT invalida: '$(VGL_DIAG_VARIANT)' (V0|V1|V2))
++endif
++endif
++
+ ifeq ($(SOFTFP_ABI),1)
+ CFLAGS += -mfloat-abi=softfp -DHAVE_SOFTFP_ABI
+ endif
+diff --git a/source/gxm.c b/source/gxm.c
+index ffa0279..fa0406b 100644
+--- a/source/gxm.c
++++ b/source/gxm.c
+@@ -572,6 +572,11 @@ void start_shader_patcher(void) {
+ }
+ 
+ static inline __attribute__((always_inline)) void scene_end(void) {
++	// SPEC-052: sello del canario. El área del pool circular que este frame acaba de
++	// escribir queda "en vuelo" hasta que su porción se recicle.
++#ifndef DISABLE_CIRCULAR_POOL
++	vgl_diag_canary_seal(vgl_circular_idx);
++#endif
+ 	// Ends current gxm scene
+ 	query_fence.value++;
+ 	sceGxmEndScene(gxm_context, NULL, &query_fence);
+@@ -815,6 +820,9 @@ void vglSwapBuffers(GLboolean has_commondialog) {
+ 	}
+ #endif
+ 	vgl_circular_idx = vgl_framecount % gxm_display_buffer_count;
++	/* SPEC-052: la porción se recicla; el canario compara el checksum del área usada en
++	   su último frame contra el sellado al hacer submit (detecta escritura en vuelo). */
++	vgl_diag_canary_check(vgl_circular_idx);
+ 	circular_data_pool_ptr[vgl_circular_idx] = circular_data_pool[vgl_circular_idx];
+ #endif
+ 
+diff --git a/source/shared.h b/source/shared.h
+index dbdf64b..cf3c06c 100644
+--- a/source/shared.h
++++ b/source/shared.h
+@@ -94,6 +94,22 @@ static inline __attribute__((always_inline)) uint32_t __get_arm_cp15_tls(void) {
+ #define THREAD_SAFE()
+ #endif
+ 
++/* SPEC-052 (HW-068): contadores de diagnóstico del pool circular. Los lee el backend
++   del port (d3d/vitagl_backend.cpp) para la línea "[hw] diag" de la Fase 2 de BUG-047.
++   Son sólo estadística: no cambian el comportamiento del driver. Las declaraciones están
++   fuera del bloque del pool para que existan también en la variante V2 (sin pool). */
++extern uint32_t vgl_diag_circ_wraps;		/* reservas hechas en el pool circular */
++extern uint32_t vgl_diag_circ_overrun;		/* reservas que cayeron al alloc por draw */
++extern uint32_t vgl_diag_circ_slot;			/* porción (slot) de la última reserva */
++extern uint32_t vgl_diag_circ_off;			/* offset de la última reserva */
++extern uint32_t vgl_diag_vgl_alloc_fail;	/* reservas que devolvieron NULL */
++extern uint32_t vgl_diag_canary_bad;		/* escrituras en vuelo detectadas */
++extern uint32_t vgl_diag_canary_checks;		/* comparaciones de canario hechas */
++extern uint32_t vgl_diag_canary_enabled;	/* el canario sólo corre si el port lo activa */
++extern uint32_t vgl_diag_variant;			/* 0=V0 (flags de producción) 1=V1 2=V2 */
++void vgl_diag_canary_seal(int slot);
++void vgl_diag_canary_check(int slot);
++
+ #if !defined(DISABLE_CIRCULAR_POOL) && !defined(CIRCULAR_POOL_SPEEDHACK)
+ extern uint8_t *circular_data_pool[DISPLAY_MAX_BUFFER_COUNT];
+ extern uint8_t *circular_data_pool_ptr[DISPLAY_MAX_BUFFER_COUNT];
+diff --git a/source/vgl.c b/source/vgl.c
+index 01f58ce..14691fa 100644
+--- a/source/vgl.c
++++ b/source/vgl.c
+@@ -125,6 +125,22 @@ void update_scissor_test_uniforms(void) {
+ 	vglSetUniformData((uint8_t *)scissor_clear_uniform_buffer + clear_depth_offset, SCE_GXM_PARAMETER_TYPE_F32, 0, 1, 1, &scissor_depth, SCE_GXM_PARAMETER_TYPE_F32);
+ }
+ 
++/* SPEC-052 (HW-068): diagnóstico del pool circular para la Fase 2 de BUG-047.
++   Sólo contadores: no cambian el comportamiento del driver. Las definiciones viven fuera
++   del bloque del pool para que existan también en la variante V2 (sin pool circular). */
++uint32_t vgl_diag_circ_wraps = 0;
++uint32_t vgl_diag_circ_overrun = 0;
++uint32_t vgl_diag_circ_slot = 0;
++uint32_t vgl_diag_circ_off = 0;
++uint32_t vgl_diag_vgl_alloc_fail = 0;
++uint32_t vgl_diag_canary_bad = 0;
++uint32_t vgl_diag_canary_checks = 0;
++uint32_t vgl_diag_canary_enabled = 0;
++#ifndef VGL_DIAG_VARIANT
++#define VGL_DIAG_VARIANT 0
++#endif
++uint32_t vgl_diag_variant = VGL_DIAG_VARIANT;
++
+ #ifndef DISABLE_CIRCULAR_POOL
+ #define CIRCULAR_POOL_SIZE_DEF (32 * 1024 * 1024) // Default size in bytes for the circular vertex pool
+ #ifdef HAVE_SCRATCH_MEMORY
+@@ -142,12 +158,68 @@ static uint8_t *circular_data_pool_ptr;
+ static uint8_t *circular_data_pool_limit;
+ #endif
+ uint32_t circular_data_pool_size = CIRCULAR_POOL_SIZE_DEF;
++/* Canary: checksum del área usada por el frame que se acaba de submitir. Cuando la porción
++   se recicla (rotación del pool) se recalcula sobre la misma área: si difiere, alguien
++   escribió en el área mientras la GPU todavía podía leerla. */
++static uint32_t vgl_diag_canary_hash[DISPLAY_MAX_BUFFER_COUNT];
++static uint8_t vgl_diag_canary_sealed[DISPLAY_MAX_BUFFER_COUNT];
++static uint32_t vgl_diag_hash(const uint8_t *base, uint32_t used) {
++	uint32_t h = 2166136261u;
++	uint32_t head = used < 64 ? used : 64;
++	for (uint32_t i = 0; i < head; i++) {
++		h ^= base[i];
++		h *= 16777619u;
++	}
++	if (used > 64) {
++		const uint8_t *tail = base + used - 64;
++		for (uint32_t i = 0; i < 64; i++) {
++			h ^= tail[i];
++			h *= 16777619u;
++		}
++	}
++	return h;
++}
++void vgl_diag_canary_seal(int slot) {
++#ifndef CIRCULAR_POOL_SPEEDHACK
++	if (!vgl_diag_canary_enabled || slot < 0 || slot >= DISPLAY_MAX_BUFFER_COUNT) return;
++	uint32_t used = (uint32_t)(circular_data_pool_ptr[slot] - circular_data_pool[slot]);
++	uint32_t cap = (uint32_t)(circular_data_pool_limit[slot] - circular_data_pool[slot]);
++	if (used > cap) used = 0;	/* el puntero pasó el límite (overrun): no hay área que sellar */
++	vgl_diag_canary_hash[slot] = vgl_diag_hash(circular_data_pool[slot], used);
++	vgl_diag_canary_sealed[slot] = 1;
++#else
++	(void)slot;
++#endif
++}
++void vgl_diag_canary_check(int slot) {
++#ifndef CIRCULAR_POOL_SPEEDHACK
++	if (!vgl_diag_canary_enabled || slot < 0 || slot >= DISPLAY_MAX_BUFFER_COUNT) return;
++	if (!vgl_diag_canary_sealed[slot]) return;
++	uint32_t used = (uint32_t)(circular_data_pool_ptr[slot] - circular_data_pool[slot]);
++	uint32_t cap = (uint32_t)(circular_data_pool_limit[slot] - circular_data_pool[slot]);
++	if (used > cap) used = 0;
++	vgl_diag_canary_checks++;
++	if (vgl_diag_hash(circular_data_pool[slot], used) != vgl_diag_canary_hash[slot]) {
++		vgl_diag_canary_bad++;
++	}
++	vgl_diag_canary_sealed[slot] = 0;
++#else
++	(void)slot;
++#endif
++}
+ uint8_t *vgl_reserve_data_pool(uint32_t size) {
+ #ifndef CIRCULAR_POOL_SPEEDHACK
+ 	uint8_t *res = circular_data_pool_ptr[vgl_circular_idx];
+ 	circular_data_pool_ptr[vgl_circular_idx] += size;
++	vgl_diag_circ_wraps++;
++	vgl_diag_circ_slot = (uint32_t)vgl_circular_idx;
++	vgl_diag_circ_off = (uint32_t)(res - circular_data_pool[vgl_circular_idx]);
+ 	if (circular_data_pool_ptr[vgl_circular_idx] > circular_data_pool_limit[vgl_circular_idx]) {
++		vgl_diag_circ_overrun++;
+ 		res = (uint8_t *)gpu_alloc_mapped_for_cpu(size);
++		if (!res) {
++			vgl_diag_vgl_alloc_fail++;
++		}
+ #ifdef LOG_ERRORS
+ 		if (!res) {
+ 			vgl_log("%s:%d gpu_alloc_mapped_for_cpu failed with a requested size of %u bytes.\n", __FILE__, __LINE__, size);

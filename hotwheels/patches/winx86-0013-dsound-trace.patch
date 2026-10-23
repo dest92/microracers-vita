@@ -1,0 +1,186 @@
+--- a/src/runtime/ds_emul.h
++++ b/src/runtime/ds_emul.h
+@@ -17,6 +17,7 @@
+ // alone never touches guest memory.
+ #pragma once
+ #include <cstdint>
++#define WX86_DS_TRACE_API 1
+ 
+ namespace d2rt { class Bridge; class Cpu; }
+ 
+@@ -36,6 +37,11 @@
+     // 0 means the host did not provide it. The engine then refuses to arm
+     // itself and reports why, rather than guessing a game's sample rate.
+     int mix_rate = 0;
++    // Optional diagnostic observer. State/Mix events run under g_mx; Output
++    // runs outside it. Must serialize itself, never call guest/runtime code.
++    // Format/event IDs: SPEC-048 (HWDS001). Null adds no PCM copy or file I/O.
++    void (*trace)(uint32_t kind, const uint32_t* words, uint32_t n,
++                  const void* payload, uint32_t bytes) = nullptr;
+ };
+ 
+ // Log sink. The engine has no console of its own — on Vita, printf output is
+--- a/src/runtime/ds_emul.cpp
++++ b/src/runtime/ds_emul.cpp
+@@ -20,6 +20,7 @@
+ #include <mutex>
+ #include <string>
+ #include <vector>
++#include <initializer_list>
+ 
+ namespace d2rt { namespace dsound {
+ 
+@@ -173,6 +174,12 @@
+ uint32_t g_pumpT0 = 0;
+ uint64_t g_produced = 0;
+ 
++// ---- optional diagnostic trace (SPEC-048 / HWDS001) -------------------------
++uint64_t g_traceFrames = 0; // advanced with snapshots under g_mx, not sink timing
++void trace(uint32_t kind, std::initializer_list<uint32_t> w,
++           const void* data = nullptr, uint32_t bytes = 0) {
++    if (g_ops.trace) g_ops.trace(kind, w.begin(), (uint32_t)w.size(), data, bytes);
++}
+ // ---- utilities ---------------------------------------------------------------
+ uint32_t gain_q16(int32_t mb) {
+     if (mb <= -10000) return 0;
+@@ -232,8 +239,12 @@
+     if (frames > kGrain) frames = kGrain;
+     const uint64_t t0 = wx86_now_us();
+     int nmix = 0;
++    uint64_t traceFrame = 0;
+     {
+         std::lock_guard<std::mutex> lk(g_mx);
++        traceFrame = g_traceFrames;
++        trace(14, {uint32_t(traceFrame), uint32_t(traceFrame >> 32), uint32_t(frames), uint32_t(kRate)});
++        g_traceFrames += (uint32_t)frames;
+         g_snap.clear();
+         for (Voice& v : g_voices) {
+             if (!v.alive || !v.playing || v.primary || !v.len) continue;
+@@ -304,6 +315,8 @@
+         int32_t v = g_acc[k];
+         g_out[k] = (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
+     }
++    trace(15, {uint32_t(traceFrame), uint32_t(traceFrame >> 32), uint32_t(frames), uint32_t(kRate)},
++          g_out, (uint32_t)ns * 2u);
+     // Second hard bound: the console sink always consumes a fixed outLen_
+     // (512 frames) regardless of `frames`, so the unused tail of g_out must
+     // be silent — otherwise the driver replays the end of the previous grain.
+@@ -422,6 +435,7 @@
+     if (!r) {
+         std::lock_guard<std::mutex> lk(g_mx);
+         if (Voice* v = voice_of(c, s)) {
++            trace(3, {s});
+             v->playing = false; v->alive = false;
+             // Reuse list: the scratch allocator never frees and is capped at
+             // 2 MiB, and the VA arena at 200/230 MiB. A voice pool recreated
+@@ -509,6 +523,7 @@
+     recompute_gains(d);
+     c.write_u32(obj + 12, 1);
+     c.write_u32(ppdup, obj);
++    trace(2, {obj, src});
+     c_created.fetch_add(1, std::memory_order_relaxed);
+     if (g_log) jpline("[son] DuplicateSoundBuffer obj=0x%08x -> obj=0x%08x (tampon 0x%08x partage)",
+                       src, obj, d.buf);
+@@ -602,6 +617,9 @@
+     c.write_u32(v.obj + 12, 1);
+     guest_zero(c, v.buf, v.len);
+     c.write_u32(ppbuf, v.obj);
++    trace(1, {v.obj, v.buf, v.len, v.flags, (uint32_t)v.ch,
++              pwfx ? c.read_u32(pwfx + 12) >> 16 : (uint32_t)v.bits,
++              v.fmtRate, v.blockAlign, pwfx ? c.read_u32(pwfx) & 0xffffu : 1u});
+     if (!primary) c_created.fetch_add(1, std::memory_order_relaxed);
+     if (g_log) jpline("[son] CreateSoundBuffer %s %u o %dch/%u Hz -> obj=0x%08x buf=0x%08x",
+                       primary ? "PRIMAIRE" : "secondaire", bytes, ch, rate, v.obj, v.buf);
+@@ -656,6 +674,7 @@
+     if (!v) return DSERR_INVALIDPARAM;
+     if (uint32_t p = c.arg(1)) c.write_u32(p, v->cursor);
+     if (uint32_t p = c.arg(2)) c.write_u32(p, write_cursor(*v));
++    trace(12, {v->obj, v->cursor, write_cursor(*v)});
+     return DS_OK;
+ }
+ uint32_t m_buf_getformat(Cpu& c) {
+@@ -715,14 +734,33 @@
+     if (pb2) c.write_u32(pb2, b2);
+     c_lockKio.fetch_add((b1 + b2) >> 10, std::memory_order_relaxed);
+     v->lockKio += (uint64_t)((b1 + b2) >> 10);
+-    return DS_OK;
+-}
+-uint32_t m_buf_unlock(Cpu&) { return DS_OK; }   // direct write: nothing to copy back
++    trace(4, {v->obj, off, b1, 0, b2});
++    return DS_OK;
++}
++uint32_t m_buf_unlock(Cpu& c) {
++    if (!g_ops.trace) return DS_OK; // direct write, no work on shipping path
++    std::lock_guard<std::mutex> lk(g_mx);
++    Voice* v = voice_of(c, c.arg(0));
++    if (!v) { trace(17, {c.arg(0), 1}); return DS_OK; }
++    for (int seg = 0; seg < 2; ++seg) {
++        const uint32_t p = c.arg(1 + seg * 2), n = c.arg(2 + seg * 2);
++        if (!n) continue;
++        // Range checks use subtraction, no wrapping p+n arithmetic.
++        if (p < v->buf || p - v->buf > v->len || n > v->len - (p - v->buf)) {
++            trace(17, {v->obj, 2}); return DS_OK;
++        }
++        const void* h = c.hostptr(p, n);
++        if (!h) { trace(17, {v->obj, 3}); return DS_OK; }
++        trace(5, {v->obj, p - v->buf, n}, h, n);
++    }
++    return DS_OK;
++}
+ uint32_t m_buf_play(Cpu& c) {
+     std::lock_guard<std::mutex> lk(g_mx);
+     Voice* v = voice_of(c, c.arg(0));
+     if (!v) return DSERR_INVALIDPARAM;
+     voice_rehost(c, *v);
++    trace(10, {v->obj, c.arg(3)});
+     v->playing = true; v->looping = (c.arg(3) & 0x1u) != 0;      // DSBPLAY_LOOPING
+     if (!v->looping) {
+         // A non-looping Play is unusual — most callers always loop and stop
+@@ -739,6 +777,7 @@
+     std::lock_guard<std::mutex> lk(g_mx);
+     Voice* v = voice_of(c, c.arg(0));
+     if (!v) return DSERR_INVALIDPARAM;
++    trace(11, {v->obj});
+     v->playing = false;
+     c_stop.fetch_add(1, std::memory_order_relaxed);
+     return DS_OK;
+@@ -748,6 +787,7 @@
+     Voice* v = voice_of(c, c.arg(0));
+     if (!v || !v->len) return DSERR_INVALIDPARAM;
+     v->cursor = c.arg(1) % v->len; v->posAcc = 0;
++    trace(9, {v->obj, v->cursor});
+     return DS_OK;
+ }
+ uint32_t m_buf_setformat(Cpu& c) {
+@@ -759,6 +799,7 @@
+     int ch = (int)(w0 >> 16); if (ch >= 1 && ch <= 2) v->ch = ch;
+     uint32_t r = c.read_u32(pwfx + 4); if (r) v->rate = v->fmtRate = r;
+     uint32_t ba = w3 & 0xffffu; v->blockAlign = ba ? ba : (uint32_t)v->ch * 2u;
++    trace(13, {v->obj, (uint32_t)v->ch, w3 >> 16, v->fmtRate, v->blockAlign});
+     return DS_OK;
+ }
+ uint32_t m_buf_setvolume(Cpu& c) {
+@@ -768,6 +809,7 @@
+     int32_t mb = (int32_t)c.arg(1);
+     if (mb > 0) mb = 0; if (mb < -10000) mb = -10000;           // DSBVOLUME_MIN
+     v->volmB = mb; recompute_gains(*v);
++    trace(7, {v->obj, (uint32_t)mb});
+     // Only path from application volume setting to audible output. Logged
+     // once per voice at its first SetVolume, plus every call that hits the
+     // floor — otherwise "everything works but every voice is at gain 0" is
+@@ -786,6 +828,7 @@
+     int32_t mb = (int32_t)c.arg(1);
+     if (mb > 10000) mb = 10000; if (mb < -10000) mb = -10000;
+     v->panmB = mb; recompute_gains(*v);
++    trace(8, {v->obj, (uint32_t)mb});
+     if (g_log && (!v->gL || !v->gR))
+         jpline("[son] SetPan obj=0x%08x %d mB -> gL=%u gR=%u (une voie eteinte)", c.arg(0), (int)mb, v->gL, v->gR);
+     return DS_OK;
+@@ -796,6 +839,7 @@
+         uint32_t f = c.arg(1);
+         // DSBFREQUENCY_ORIGINAL == 0: revert to the format's frequency.
+         if (!f) f = v->fmtRate;
++        trace(6, {v->obj, f});
+         if (f != v->rate) {
+             v->rate = f;
+             static bool cried = false;

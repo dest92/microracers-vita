@@ -1,0 +1,226 @@
+diff --git a/src/dynarec86/dyn86.h b/src/dynarec86/dyn86.h
+index 2a300d7..3e2be85 100644
+--- a/src/dynarec86/dyn86.h
++++ b/src/dynarec86/dyn86.h
+@@ -60,9 +60,12 @@ void dyn86_init(void);
+ /* HW-059 fixed-image cache. On-disk access happens before translation and at
+  * process exit; dynarec call sites only touch this in-memory index. */
+ typedef struct dyn86_tcache_view_s {
+-    uint32_t arm_size, inst_count, flags, instsize_size;
++    uint32_t arm_size, inst_count, flags, instsize_size, reloc_count;
+     const uint8_t *arm, *instsize;
++    const void *relocs;
+ } dyn86_tcache_view_t;
++int dyn86_tcache_apply_fixups(uint8_t *arm, uint32_t arm_size,
++                              const void *relocs, uint32_t reloc_count);
+ void dyn86_tcache_init(void);
+ int dyn86_tcache_find(uint32_t eip, const void *source, uint32_t source_size,
+                       dyn86_tcache_view_t *out);
+diff --git a/src/dynarec86/dyn86_tcache.c b/src/dynarec86/dyn86_tcache.c
+index 6c9d7c4..0d21a04 100644
+--- a/src/dynarec86/dyn86_tcache.c
++++ b/src/dynarec86/dyn86_tcache.c
+@@ -16,8 +16,15 @@
+ 
+ #define TC_MAX_FILE (64u*1024u*1024u)
+ #define TC_MAX_ENTRIES 65536u
+-#define TC_VERSION 2u
+-#define TC_MAGIC "WXTCARM2"
++#define TC_VERSION 3u
++#define TC_MAGIC "WXTCARM3"
++#define TC_RELOC_PC_BRANCH 1u
++#define TC_RELOC_HOST_BASE_ADD 2u
++
++typedef struct __attribute__((packed)) {
++    uint32_t arm_off, type, value;
++} tcache_reloc_t;
++extern uintptr_t dyn86_membase;
+ 
+ typedef struct __attribute__((packed)) {
+     char magic[8];
+@@ -26,11 +33,11 @@ typedef struct __attribute__((packed)) {
+     char chain_mode[16];
+ } file_header_t;
+ typedef struct __attribute__((packed)) {
+-    uint32_t eip, source_size, arm_size, inst_count, flags, instsize_size, record_crc;
++    uint32_t eip, source_size, arm_size, inst_count, flags, instsize_size, reloc_count, record_crc;
+ } record_header_t;
+ typedef struct {
+     record_header_t h;
+-    uint8_t *payload; /* source || ARM body || instsize[count+2] */
++    uint8_t *payload; /* source || ARM body || relocations || instsize[count+2] */
+ } cache_entry_t;
+ static cache_entry_t *entries;
+ static uint32_t entry_count, entry_cap;
+@@ -70,7 +77,7 @@ static int add_entry(const record_header_t *h, const uint8_t *payload) {
+         cache_entry_t *p=(cache_entry_t*)realloc(entries, (size_t)cap*sizeof(*p));
+         if (!p) return 0; entries=p; entry_cap=cap;
+     }
+-    size_t n=(size_t)h->source_size+h->arm_size+h->instsize_size;
++    size_t n=(size_t)h->source_size+h->arm_size+(size_t)h->reloc_count*sizeof(tcache_reloc_t)+h->instsize_size;
+     uint8_t *copy=(uint8_t*)malloc(n);
+     if (!copy) return 0; memcpy(copy,payload,n);
+     entries[entry_count].h=*h; entries[entry_count].payload=copy; ++entry_count;
+@@ -94,8 +101,13 @@ static void load_file(void) {
+     for(uint32_t i=0;i<h.count;i++) {
+         if(off+sizeof(record_header_t)>h.payload_size) break;
+         record_header_t r; memcpy(&r,payload+off,sizeof(r)); off+=sizeof(r);
+-        size_t n=(size_t)r.source_size+r.arm_size+r.instsize_size;
+-        if(!r.source_size || !r.arm_size || r.arm_size>4u*1024u*1024u || r.inst_count>65536u || r.instsize_size!=r.inst_count+2u || n>h.payload_size-off) break;
++        size_t remain=(size_t)h.payload_size-off;
++        if(!r.source_size || !r.arm_size || r.arm_size>4u*1024u*1024u || r.inst_count>65536u ||
++           r.reloc_count>r.arm_size/4u || r.instsize_size!=r.inst_count+2u ||
++           r.source_size>remain || r.arm_size>remain-r.source_size ||
++           r.reloc_count>(remain-r.source_size-r.arm_size)/sizeof(tcache_reloc_t) ||
++           r.instsize_size>remain-r.source_size-r.arm_size-(size_t)r.reloc_count*sizeof(tcache_reloc_t)) break;
++        size_t n=(size_t)r.source_size+r.arm_size+(size_t)r.reloc_count*sizeof(tcache_reloc_t)+r.instsize_size;
+         if(crc32_bytes(payload+off,n)!=r.record_crc || !add_entry(&r,payload+off)) break;
+         ++good; off+=n;
+     }
+@@ -109,7 +121,7 @@ static void flush_file(void) {
+     if(!enabled || !file_path[0] || !dirty) return;
+     pthread_mutex_lock(&entries_mx);
+     size_t payload_n=0;
+-    for(uint32_t i=0;i<entry_count;i++) payload_n+=sizeof(record_header_t)+(size_t)entries[i].h.source_size+entries[i].h.arm_size+entries[i].h.instsize_size;
++    for(uint32_t i=0;i<entry_count;i++) payload_n+=sizeof(record_header_t)+(size_t)entries[i].h.source_size+entries[i].h.arm_size+(size_t)entries[i].h.reloc_count*sizeof(tcache_reloc_t)+entries[i].h.instsize_size;
+     if(payload_n>TC_MAX_FILE-sizeof(file_header_t)) { pthread_mutex_unlock(&entries_mx); return; }
+     size_t total=sizeof(file_header_t)+payload_n;
+     uint8_t *buf=(uint8_t*)malloc(total); if(!buf) { pthread_mutex_unlock(&entries_mx); return; }
+@@ -118,7 +130,7 @@ static void flush_file(void) {
+     memcpy(h.chain_mode,chain_mode,sizeof(chain_mode));
+     size_t off=sizeof(h);
+     for(uint32_t i=0;i<entry_count;i++) {
+-        cache_entry_t *e=&entries[i]; size_t n=(size_t)e->h.source_size+e->h.arm_size+e->h.instsize_size;
++        cache_entry_t *e=&entries[i]; size_t n=(size_t)e->h.source_size+e->h.arm_size+(size_t)e->h.reloc_count*sizeof(tcache_reloc_t)+e->h.instsize_size;
+         memcpy(buf+off,&e->h,sizeof(e->h)); off+=sizeof(e->h); memcpy(buf+off,e->payload,n); off+=n;
+     }
+     h.payload_crc=crc32_bytes(buf+sizeof(h),payload_n); memcpy(buf,&h,sizeof(h));
+@@ -141,7 +153,7 @@ void dyn86_tcache_init(void) {
+     if(!on || on[0]!='1' || !dir || !hex_key(id) || !fixed || fixed[0]!='1' || !target || strcmp(target,"qemu-arm-static")) return;
+     if(!chain || !cache_chain || strcmp(chain,cache_chain) || (strcmp(chain,"0") && strcmp(chain,"1"))) return;
+     snprintf(chain_mode,sizeof(chain_mode),"chain=%s",chain);
+-    if(snprintf(file_path,sizeof(file_path),"%s/winx86-armv7-v2.bin",dir)>=(int)sizeof(file_path)) return;
++    if(snprintf(file_path,sizeof(file_path),"%s/winx86-armv7-v3.bin",dir)>=(int)sizeof(file_path)) return;
+     const char *glo=getenv("WX86_TCACHE_GUEST_BASE"), *gsz=getenv("WX86_TCACHE_GUEST_SIZE");
+     if(glo && gsz) {
+         unsigned long lo=strtoul(glo,NULL,0), size=strtoul(gsz,NULL,0);
+@@ -158,20 +170,53 @@ int dyn86_tcache_find(uint32_t eip, const void *source, uint32_t source_size, dy
+     for(uint32_t i=0;i<entry_count;i++) {
+         cache_entry_t *e=&entries[i];
+         if(e->h.eip==eip && e->h.source_size==source_size && !memcmp(e->payload,source,source_size)) {
+-            out->arm_size=e->h.arm_size; out->inst_count=e->h.inst_count; out->flags=e->h.flags; out->instsize_size=e->h.instsize_size;
+-            out->arm=e->payload+source_size; out->instsize=out->arm+e->h.arm_size; ++hits;
++            out->arm_size=e->h.arm_size; out->inst_count=e->h.inst_count; out->flags=e->h.flags; out->instsize_size=e->h.instsize_size; out->reloc_count=e->h.reloc_count;
++            out->arm=e->payload+source_size; out->relocs=out->arm+e->h.arm_size;
++            out->instsize=(const uint8_t*)out->relocs+(size_t)out->reloc_count*sizeof(tcache_reloc_t); ++hits;
+             pthread_mutex_unlock(&entries_mx); return 1;
+         }
+     }
+     ++misses; pthread_mutex_unlock(&entries_mx); return 0;
+ }
+ 
++static uint32_t ror32(uint32_t v, unsigned n) { n&=31u; return n ? (v>>n)|(v<<(32u-n)) : v; }
++static int arm_imm_encode(uint32_t value, uint32_t *field) {
++    for(unsigned rot=0;rot<16;rot++) for(unsigned imm=0;imm<256;imm++)
++        if(ror32(imm,2u*rot)==value) { *field=(rot<<8)|imm; return 1; }
++    return 0;
++}
++int dyn86_tcache_apply_fixups(uint8_t *arm, uint32_t arm_size,
++                              const void *raw, uint32_t reloc_count) {
++    const tcache_reloc_t *rel=(const tcache_reloc_t*)raw;
++    if((reloc_count && !rel) || reloc_count>arm_size/4u) return 0;
++    for(uint32_t i=0;i<reloc_count;i++) {
++        uint32_t w;
++        if(arm_size<4u || rel[i].arm_off>arm_size-4u || (rel[i].arm_off&3u)) return 0;
++        memcpy(&w,arm+rel[i].arm_off,4);
++        if(rel[i].type==TC_RELOC_PC_BRANCH) {
++            if((w&0x0e000000u)!=0x0a000000u || (w>>28)==15u || rel[i].value>=arm_size || (rel[i].value&3u)) return 0;
++            int64_t delta=(int64_t)rel[i].value-(int64_t)(rel[i].arm_off+8u);
++            if((delta&3) || delta<-(1<<25) || delta>=(1<<25)) return 0;
++            w=(w&0xff000000u)|((uint32_t)(delta>>2)&0x00ffffffu);
++        } else if(rel[i].type==TC_RELOC_HOST_BASE_ADD) {
++            if((w&0x0c000000u)!=0 || !(w&(1u<<25)) || ((w>>21)&15u)!=4u || ((w>>16)&15u)==15u) return 0;
++            uint32_t imm;
++            if(!dyn86_membase || dyn86_membase>UINT32_MAX || !arm_imm_encode((uint32_t)dyn86_membase,&imm)) return 0;
++            w=(w&0xfffff000u)|imm;
++        } else return 0;
++        memcpy(arm+rel[i].arm_off,&w,4);
++    }
++    return 1;
++}
++
+ int dyn86_tcache_code_stable(const uint8_t *code, uint32_t size, uint32_t guest_lo, uint32_t guest_hi) {
+     uintptr_t image_lo=(uintptr_t)__executable_start, image_hi=(uintptr_t)_end;
+     if(!guest_lo || guest_hi<=guest_lo) { guest_lo=g_guest_lo; guest_hi=g_guest_hi; }
+     if(!image_lo || image_hi<=image_lo) return 0;
+     for(uint32_t i=0;i<size;i+=4) {
+         uint32_t w; memcpy(&w,code+i,4);
++        /* ARMv7 bitfield media encodings overlap the legacy transfer class. */
++        if((w&0x0fe00070u)==0x07e00050u) continue; /* UBFX/SBFX */
+         /* Immediate B/BL survives relocation only when its target is in this
+          * body. External PC-relative control flow is deliberately a miss. */
+         if((w&0x0e000000u)==0x0a000000u) {
+@@ -246,14 +291,33 @@ int dyn86_tcache_code_stable(const uint8_t *code, uint32_t size, uint32_t guest_
+ void dyn86_tcache_record(uint32_t eip, const void *source, uint32_t source_size,
+                          const uint8_t *arm, uint32_t arm_size, const void *instsize,
+                          uint32_t inst_count, uint32_t instsize_size, uint32_t flags) {
+-    if(!enabled || !source || !arm || !instsize || !source_size || !arm_size || arm_size%4 || instsize_size!=inst_count+2u) { ++rejected; return; }
++    if(!enabled || !source || !arm || !instsize || !source_size || source_size>TC_MAX_FILE ||
++       !arm_size || arm_size>TC_MAX_FILE || arm_size%4 || instsize_size!=inst_count+2u) { ++rejected; return; }
+     if(!dyn86_tcache_code_stable(arm,arm_size,0,0)) { ++rejected; return; }
+-    record_header_t h={eip,source_size,arm_size,inst_count,flags,instsize_size,0};
+-    size_t n=(size_t)source_size+arm_size+instsize_size;
++    tcache_reloc_t *rel=(tcache_reloc_t*)calloc(arm_size/4u,sizeof(*rel));
++    uint8_t *normalized=(uint8_t*)malloc(arm_size);
++    if(!rel || !normalized) { free(rel); free(normalized); ++rejected; return; }
++    memcpy(normalized,arm,arm_size); uint32_t nr=0;
++    for(uint32_t i=0;i<arm_size;i+=4) {
++        uint32_t w; memcpy(&w,normalized+i,4);
++        if((w&0x0e000000u)==0x0a000000u) {
++            int32_t d=(int32_t)(w<<8)>>6; int64_t target=(int64_t)i+8+d;
++            rel[nr++]=(tcache_reloc_t){i,TC_RELOC_PC_BRANCH,(uint32_t)target};
++        } else if(dyn86_membase && (w&0x0c000000u)==0 && (w&(1u<<25)) && ((w>>21)&15u)==4u && ((w>>16)&15u)!=15u) {
++            unsigned rot=((w>>8)&15u)*2u; uint32_t imm=ror32(w&255u,rot);
++            if(imm==(uint32_t)dyn86_membase) {
++                rel[nr++]=(tcache_reloc_t){i,TC_RELOC_HOST_BASE_ADD,0};
++                w&=0xfffff000u; memcpy(normalized+i,&w,4);
++            }
++        }
++    }
++    record_header_t h={eip,source_size,arm_size,inst_count,flags,instsize_size,nr,0};
++    size_t n=(size_t)source_size+arm_size+(size_t)nr*sizeof(*rel)+instsize_size;
+-    uint8_t *payload=(uint8_t*)malloc(n); if(!payload) { ++rejected; return; }
++    uint8_t *payload=(uint8_t*)malloc(n); if(!payload) { free(rel); free(normalized); ++rejected; return; }
+-    memcpy(payload,source,source_size); memcpy(payload+source_size,arm,arm_size);
+-    memcpy(payload+source_size+arm_size,instsize,instsize_size);
+-    h.record_crc=crc32_bytes(payload,n);
++    memcpy(payload,source,source_size); memcpy(payload+source_size,normalized,arm_size);
++    memcpy(payload+source_size+arm_size,rel,(size_t)nr*sizeof(*rel));
++    memcpy(payload+source_size+arm_size+(size_t)nr*sizeof(*rel),instsize,instsize_size);
++    h.record_crc=crc32_bytes(payload,n); free(rel); free(normalized);
+     pthread_mutex_lock(&entries_mx);
+     if(add_entry(&h,payload)) { ++saved; dirty=1; } else ++rejected;
+     pthread_mutex_unlock(&entries_mx); free(payload);
+diff --git a/third_party/box86-dynarec/dynarec/dynarec_arm.c b/third_party/box86-dynarec/dynarec/dynarec_arm.c
+index c4532c8..5babfd4 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec_arm.c
++++ b/third_party/box86-dynarec/dynarec/dynarec_arm.c
+@@ -529,6 +529,10 @@ dynarec_log(LOG_DEBUG, "Asked to Fill block %p with %p\n", block, (void*)addr);
+                 void *next=p+arm_size;
+                 instsize_t *instsize=(instsize_t*)(next+8*sizeof(void*));
+                 memcpy(p,cached.arm,cached.arm_size);
++                if(!dyn86_tcache_apply_fixups((uint8_t*)p,cached.arm_size,cached.relocs,cached.reloc_count)) {
++                    FreeDynarecMap((uintptr_t)actual_p); actual_p=NULL;
++                }
++                if(actual_p) {
+                 memset((uint8_t*)p+cached.arm_size,0,arm_size-cached.arm_size);
+                 memcpy(instsize,cached.instsize,(cached.inst_count+2)*sizeof(instsize_t));
+                 block->actual_block=actual_p; block->block=p; block->size=(int)sz;
+@@ -547,6 +551,7 @@ dynarec_log(LOG_DEBUG, "Asked to Fill block %p with %p\n", block, (void*)addr);
+                 }
+                 current_helper=NULL;
+                 return (void*)block;
++                }
+             }
+         }
+     }

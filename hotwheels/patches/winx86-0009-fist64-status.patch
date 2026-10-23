@@ -1,0 +1,102 @@
+diff --git a/third_party/box86-dynarec/dynarec/dynarec_arm_df.c b/third_party/box86-dynarec/dynarec/dynarec_arm_df.c
+index 5f538dc..a8fca5b 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec_arm_df.c
++++ b/third_party/box86-dynarec/dynarec/dynarec_arm_df.c
+@@ -348,10 +348,11 @@ uintptr_t dynarecDF(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
+                     parity = getedparity(dyn, ninst, addr, nextop, 3);
+                     addr = geted(dyn, addr, ninst, nextop, &ed, x1, &fixedaddress, 0, 0, 0, NULL);
+                     MMU_ADDR(ed, x1);
+-                    if(ninst
++                    int exact_fild = ninst
+                       && dyn->insts[ninst-1].x86.addr
+                       && *(uint8_t*)DYN86_G2H(dyn->insts[ninst-1].x86.addr)==0xDF
+-                      && (((*(uint8_t*)DYN86_G2H(dyn->insts[ninst-1].x86.addr+1))>>3)&7)==5)
++                      && (((*(uint8_t*)DYN86_G2H(dyn->insts[ninst-1].x86.addr+1))>>3)&7)==5;
++                    if(exact_fild)
+                     {
+                         if(parity) {
+                             // D2Vita 03/09 : getedparity() CROIT l adresse 8-alignee ; si c est
+@@ -423,6 +424,13 @@ uintptr_t dynarecDF(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
+                         STR_IMM9(x3, ed, 4);
+                     }
+                     X87_POP_OR_FAIL(dyn, ninst, x3);
++                    if(exact_fild) {
++                        MOV_REG(xEmu, xEmu);
++                        CALL(arm_fist64_clear_c1, -1, 0);
++                    } else {
++                        VMOV_64(0, v1);
++                        CALL_1DDR(arm_fist64_status, xEmu, x14, (1<<x2)|(1<<x3));
++                    }
+                     break;
+                 default:
+                     DEFAULT;
+diff --git a/third_party/box86-dynarec/dynarec/dynarec_arm_functions.c b/third_party/box86-dynarec/dynarec/dynarec_arm_functions.c
+index 1334619..684436e 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec_arm_functions.c
++++ b/third_party/box86-dynarec/dynarec/dynarec_arm_functions.c
+@@ -174,6 +174,52 @@ int64_t arm_fist64_3(double d)
+     return tmp;
+ }
+ 
++void arm_fist64_status(double d, x86emu_t* emu)
++{
++    uint64_t bits;
++    memcpy(&bits, &d, sizeof(bits));
++    const uint64_t exponent = (bits >> 52) & 0x7ff;
++    const uint64_t fraction = bits & 0x000fffffffffffffULL;
++    uint16_t raised = 0;
++    if (exponent == 0 && fraction)
++        raised |= 1u << 1; // DE: denormal operand
++
++    double rounded = d;
++    if (!isfinite(d)) {
++        raised |= 1u << 0; // IE: invalid conversion
++    } else {
++        switch ((emu->cw.x16 >> 10) & 3) {
++            case 0: {
++                double low = floor(d);
++                double part = d - low;
++                if (part > 0.5 || (part == 0.5 && fmod(fabs(low), 2.0) != 0.0))
++                    rounded = low + 1.0;
++                else
++                    rounded = low;
++                break;
++            }
++            case 1: rounded = floor(d); break;
++            case 2: rounded = ceil(d); break;
++            default: rounded = trunc(d); break;
++        }
++        if (rounded < -0x1p63 || rounded >= 0x1p63)
++            raised |= 1u << 0;
++        else if (rounded != d)
++            raised |= 1u << 5;
++    }
++    emu->sw.x16 |= raised;
++    if (raised & (uint16_t)~emu->cw.x16 & 0x003f) {
++        emu->sw.f.F87_ES = 1;
++        emu->sw.f.F87_B = 1;
++    }
++    emu->sw.f.F87_C1 = (isfinite(d) && !(raised & 1) && fabs(rounded) > fabs(d));
++}
++
++void arm_fist64_clear_c1(x86emu_t* emu)
++{
++    emu->sw.f.F87_C1 = 0;
++}
++
+ void arm_fld(x86emu_t* emu, uint8_t* ed)
+ {
+     memcpy(&STld(0).ld, ed, 10);
+diff --git a/third_party/box86-dynarec/dynarec/dynarec_arm_functions.h b/third_party/box86-dynarec/dynarec/dynarec_arm_functions.h
+index 4f0abe9..754f3d7 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec_arm_functions.h
++++ b/third_party/box86-dynarec/dynarec/dynarec_arm_functions.h
+@@ -35,6 +35,8 @@ int64_t arm_fist64_0(double d);
+ int64_t arm_fist64_1(double d);
+ int64_t arm_fist64_2(double d);
+ int64_t arm_fist64_3(double d);
++void arm_fist64_status(double d, x86emu_t* emu);
++void arm_fist64_clear_c1(x86emu_t* emu);
+ 
+ void arm_ud(x86emu_t* emu);
+ void arm_priv(x86emu_t* emu);

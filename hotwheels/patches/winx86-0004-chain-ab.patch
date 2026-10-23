@@ -1,0 +1,29 @@
+diff --git a/src/dynarec86/dyn86.c b/src/dynarec86/dyn86.c
+index a83f9ea..ac4f299 100644
+--- a/src/dynarec86/dyn86.c
++++ b/src/dynarec86/dyn86.c
+@@ -148,13 +148,18 @@ void dyn86_set_quantum(uint32_t n)
+     g_quantum = n;
+ }
+ 
+-/* Always direct-link: preemption no longer needs the LinkNext funnel.
+- * D2_NOLINK=1 (diag): keep every chain in the LinkNext funnel so a
+- * block-level trace sees ALL transitions (slower). */
++/* Direct-linking avoids a LinkNext round-trip at every block transition.
++ * WX86_CHAIN=0 selects the old funnel for A/B and diagnostics; =1 forces
++ * direct links. With no override, preserve the historical default and the
++ * WX86_NOLINK/D2_NOLINK diagnostic switches. */
+ int dyn86_link_direct(void) {
+-    static int nolink = -1;
+-    if (nolink < 0) nolink = (getenv("WX86_NOLINK") != NULL || getenv("D2_NOLINK") != NULL) ? 1 : 0;
+-    return !nolink;
++    static int direct = -1;
++    if (direct < 0) {
++        const char* chain = getenv("WX86_CHAIN");
++        if (chain && chain[0]) direct = chain[0] != '0';
++        else direct = (getenv("WX86_NOLINK") == NULL && getenv("D2_NOLINK") == NULL) ? 1 : 0;
++    }
++    return direct;
+ }
+ 
+ int dyn86_should_break(void)

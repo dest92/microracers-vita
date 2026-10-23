@@ -1,0 +1,286 @@
+diff --git a/src/runtime/pmu_metrics.h b/src/runtime/pmu_metrics.h
+new file mode 100644
+index 0000000..6e9d0b2
+--- /dev/null
++++ b/src/runtime/pmu_metrics.h
+@@ -0,0 +1,17 @@
++#pragma once
++#include <cstdint>
++
++namespace d2rt { namespace pmu {
++struct Counters { uint32_t cycles = 0, inst = 0, br_mispred = 0, dc_miss = 0; };
++
++// One modular subtraction is exact if fewer than 2^32 events occurred.
++inline Counters delta(const Counters& before, const Counters& after) {
++    return Counters{after.cycles - before.cycles, after.inst - before.inst,
++                    after.br_mispred - before.br_mispred, after.dc_miss - before.dc_miss};
++}
++inline bool ipc_milli(uint64_t cycles, uint64_t inst, uint64_t* out) {
++    if (!out || !cycles) return false;
++    *out = inst * 1000ull / cycles;
++    return true;
++}
++}} // namespace d2rt::pmu
+diff --git a/src/runtime/sched_native.cpp b/src/runtime/sched_native.cpp
+index 86269b4..fec5639 100644
+--- a/src/runtime/sched_native.cpp
++++ b/src/runtime/sched_native.cpp
+@@ -13,6 +13,7 @@ extern "C" {
+     uint64_t d2rt_poll0_n = 0;
+ }
+ #include "runtime/prof.h"
++#include "runtime/pmu_metrics.h"
+ 
+ #include <cstdio>
+ #include <vector>
+@@ -46,12 +47,76 @@ extern "C" void dyn86_vita_open_vm_thread(void);   // mman_vita.c — VM domain
+ extern "C" { extern uint32_t d2rt_sw_seq; }   // tick_real cache invalidation (rt_boot)
+ extern "C" void dyn86_dump_xfer(void);
+ 
++#ifdef __vita__
++extern "C" int vpmuEnableUser(uint32_t enable);
++extern "C" uint32_t vpmuGetUserEnable(void);
++extern "C" int _vshKernelSearchModuleByName(const char* name, int* info);
++#endif
++extern "C" void dyn86_pmu_set_active(int on);
++extern "C" void dyn86_pmu_dispatch_reset(void);
++extern "C" uint64_t dyn86_pmu_dispatch_read(void);
++extern "C" uint32_t dyn86_pmu_dispatch_samples_read(void);
++
+ namespace d2rt {
+ 
+ using S = GuestThread::State;
+ 
+ static void progress(const char* m) { wx86_vita_progress_c(m); }
+ 
++namespace {
++struct PmuValues { uint32_t cycles; uint32_t event[6]; };
++static const uint8_t kPmuEvents[] = {0x68, 0x04, 0x03, 0x10, 0x61, 0x60};
++static bool pmu_requested() {
++    const char* e = std::getenv("WX86_PMU");
++    if (!e) e = std::getenv("HW_PMU");
++    return e && *e && *e != '0';
++}
++#ifdef __vita__
++static inline void pmu_pmcr(uint32_t v) { __asm__ volatile("mcr p15,0,%0,c9,c12,0" :: "r"(v) : "memory"); }
++static inline void pmu_cntenset(uint32_t v) { __asm__ volatile("mcr p15,0,%0,c9,c12,1" :: "r"(v) : "memory"); }
++static inline void pmu_cntenclr(uint32_t v) { __asm__ volatile("mcr p15,0,%0,c9,c12,2" :: "r"(v) : "memory"); }
++static inline void pmu_pmselr(uint32_t v) { __asm__ volatile("mcr p15,0,%0,c9,c12,5" :: "r"(v) : "memory"); __asm__ volatile("isb" ::: "memory"); }
++static inline void pmu_evtyper(uint32_t v) { __asm__ volatile("mcr p15,0,%0,c9,c13,1" :: "r"(v) : "memory"); }
++static inline uint32_t pmu_ccnt() { uint32_t v; __asm__ volatile("mrc p15,0,%0,c9,c13,0" : "=r"(v)); return v; }
++static inline uint32_t pmu_evcnt() { uint32_t v; __asm__ volatile("mrc p15,0,%0,c9,c13,2" : "=r"(v)); return v; }
++static bool pmu_thread_init() {
++    int module_info[2] = {0, 0};
++    if (_vshKernelSearchModuleByName("vpmu", module_info) < 0) {
++        progress("pmu: vpmu.skprx ausente (HW_PMU omitido)"); return false;
++    }
++    const int rc = vpmuEnableUser(1); // refreshes PMUSERENR for this new OS thread too
++    if (rc) {
++        char m[128]; std::snprintf(m, sizeof m, "pmu: sin permiso en hilo (vpmuEnableUser rc=0x%08x)", (unsigned)rc);
++        progress(m); return false;
++    }
++    if (!(vpmuGetUserEnable() & 1u)) {
++        progress("pmu: PMUSERENR no habilitado; contadores omitidos"); return false;
++    }
++    pmu_cntenclr(0x8000003fu);
++    for (unsigned i = 0; i < sizeof kPmuEvents; ++i) {
++        pmu_pmselr(i); pmu_evtyper(kPmuEvents[i]);
++    }
++    return true;
++}
++static void pmu_begin() {
++    pmu_cntenclr(0x8000003fu);
++    pmu_pmcr(0x7u); // enable and reset CCNT + event counters for a bounded slice
++    pmu_cntenset(0x8000003fu);
++}
++static PmuValues pmu_end() {
++    PmuValues v{};
++    pmu_cntenclr(0x8000003fu);
++    v.cycles = pmu_ccnt();
++    for (unsigned i = 0; i < sizeof kPmuEvents; ++i) { pmu_pmselr(i); v.event[i] = pmu_evcnt(); }
++    return v;
++}
++#else
++static bool pmu_thread_init() { return false; }
++static void pmu_begin() {}
++static PmuValues pmu_end() { return {}; }
++#endif
++} // namespace
++
+ NativeScheduler::NativeScheduler(Cpu* cpu, Bridge* br,
+                                  uint32_t stack_region, uint32_t stack_each,
+                                  uint32_t tib_region)
+@@ -825,6 +890,24 @@ void NativeScheduler::run_guest(GuestThread* t) {
+     uint32_t eip = cpu_->reg(R_EIP);
+     const char* fault = nullptr;
+     bool ok;
++    NT* pn = nt(t);
++#ifdef __vita__
++    // Emit a bounded marker before and after the optional PMU API.  A guest
++    // thread that later stalls in cpu_->run() otherwise never reaches the
++    // aggregate line at finish_thread(), making an init hang indistinguishable
++    // from a DDraw/GIL stall.  The writes happen before the measured slice.
++    if (pmu_requested() && !pn->pmu_init_reported) {
++        char m[96];
++        std::snprintf(m, sizeof m, "pmu: init begin tid=%u", (unsigned)t->id);
++        progress(m);
++        pn->pmu_on = pmu_thread_init();
++        std::snprintf(m, sizeof m, "pmu: init end tid=%u enabled=%u",
++                      (unsigned)t->id, pn->pmu_on ? 1u : 0u);
++        progress(m);
++        pn->pmu_init_reported = true;
++    }
++    dyn86_pmu_set_active(pn->pmu_on ? 1 : 0);
++#endif
+     {
+         gil::Release r;
+         for (;;) {
+@@ -843,9 +913,30 @@ void NativeScheduler::run_guest(GuestThread* t) {
+             // profiler reports "run=0ms" even while the thread is actually
+             // executing translated code — a zero here would look like valid
+             // data instead of an unfed counter.
++            if (pn->pmu_on) { pmu_begin(); dyn86_pmu_dispatch_reset(); }
+             const uint64_t run_t0 = dyn86_jp_now_us();
+             ok = cpu_->run(eip, &fault);
+-            dyn86_jp_run_us += dyn86_jp_now_us() - run_t0;
++            const uint64_t run_dt = dyn86_jp_now_us() - run_t0;
++            dyn86_jp_run_us += run_dt;
++            if (pn->pmu_on) {
++                const PmuValues pv = pmu_end();
++                // All seven A9 counters are 32-bit; reject oversized slices
++                // rather than silently undercounting one or more wraps.
++                if (run_dt > 500000u) ++pn->pmu_bad_windows;
++                else {
++                    pn->pmu_dispatch_cycles += dyn86_pmu_dispatch_read();
++                    pn->pmu_dispatch_samples += dyn86_pmu_dispatch_samples_read();
++                    pn->pmu_cycles += pv.cycles;
++                    pn->pmu_inst += pv.event[0];
++                    pn->pmu_dc_access += pv.event[1];
++                    pn->pmu_dc_miss += pv.event[2];
++                    pn->pmu_br += pv.event[3];
++                    pn->pmu_dc_stall += pv.event[4];
++                    pn->pmu_ic_stall += pv.event[5];
++                    pn->pmu_run_us += run_dt;
++                    ++pn->pmu_slices;
++                }
++            }
+ #ifdef PROF_COUNTERS
+             { const uint64_t dt = d2rt::prof::now_ns() - prof_t0;
+               d2rt::prof::run_ns += dt; t->prof_ns += dt; }
+@@ -884,6 +975,27 @@ void NativeScheduler::run_guest(GuestThread* t) {
+     }
+     finish_thread(t, ok, fault);
+     t->slices++;
++    if (pn->pmu_on) {
++        uint32_t traps = 0, gil_cont = 0, gil_wait_us = 0;
++        cpu_->thread_emu_filstat(pn->emu, &traps, &gil_cont, &gil_wait_us);
++        uint64_t ipc_milli = 0;
++        const bool have_ipc = pmu::ipc_milli(pn->pmu_cycles, pn->pmu_inst, &ipc_milli);
++        const char* scene = std::getenv("HW_PMU_SCENE");
++        if (!scene || !*scene) scene = "unknown";
++        char m[448];
++        std::snprintf(m, sizeof m,
++            "pmu: scene=%s tid=%u cycles=%llu inst_rename=%llu ipc_proxy_milli=%llu ipc_valid=%u br_mispred=%llu dc_access=%llu dc_miss=%llu dc_stall=%llu ic_stall=%llu dispatch_lookup_cycles_est=%llu dispatch_samples=%llu cpu_run_us=%llu slices=%llu invalid_slices=%llu traps=%u gil_cont=%u gil_wait_us=%u",
++            scene, (unsigned)t->id, (unsigned long long)pn->pmu_cycles,
++            (unsigned long long)pn->pmu_inst, (unsigned long long)ipc_milli, have_ipc ? 1u : 0u,
++            (unsigned long long)pn->pmu_br, (unsigned long long)pn->pmu_dc_access,
++            (unsigned long long)pn->pmu_dc_miss, (unsigned long long)pn->pmu_dc_stall,
++            (unsigned long long)pn->pmu_ic_stall, (unsigned long long)pn->pmu_dispatch_cycles,
++            (unsigned long long)pn->pmu_dispatch_samples,
++            (unsigned long long)pn->pmu_run_us,
++            (unsigned long long)pn->pmu_slices, (unsigned long long)pn->pmu_bad_windows,
++            (unsigned)traps, (unsigned)gil_cont, (unsigned)gil_wait_us);
++        progress(m);
++    }
+ }
+ 
+ // ---- Starvation-avoidance net: mechanism helpers ---------------------------
+diff --git a/src/runtime/sched_native.h b/src/runtime/sched_native.h
+index 7642e88..cba39db 100644
+--- a/src/runtime/sched_native.h
++++ b/src/runtime/sched_native.h
+@@ -235,6 +235,19 @@ private:
+         // recycling: Finished state alone isn't enough — TerminateThread
+         // sets it FROM THE OUTSIDE while the target may still be running.
+         bool            runner_done = false;
++        // Opt-in HW_PMU totals. Written only by this guest thread's host
++        // runner; emitted once at thread exit so profile logging never adds
++        // per-window memory-card I/O to the measured path.
++        bool            pmu_on = false;
++        // Set after the first opt-in attempt, even on failure, so a failed
++        // weak/plugin check cannot spam progress.txt on every guest slice.
++        bool            pmu_init_reported = false;
++        uint64_t        pmu_cycles = 0, pmu_inst = 0, pmu_br = 0;
++        uint64_t        pmu_dc_access = 0, pmu_dc_miss = 0;
++        uint64_t        pmu_dc_stall = 0, pmu_ic_stall = 0;
++        uint64_t        pmu_dispatch_cycles = 0, pmu_run_us = 0;
++        uint64_t        pmu_dispatch_samples = 0;
++        uint64_t        pmu_slices = 0, pmu_bad_windows = 0;
+     };
+     static void* runner_tramp(void* guest_thread);
+     void runner(GuestThread* t);            // worker body (GIL taken inside)
+diff --git a/third_party/box86-dynarec/dynarec/dynarec.c b/third_party/box86-dynarec/dynarec/dynarec.c
+index e3f3aa1..558ed9e 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec.c
++++ b/third_party/box86-dynarec/dynarec/dynarec.c
+@@ -33,6 +33,30 @@ extern uint32_t dyn86_ev_fatal;
+ extern uint32_t dyn86_ev_oomexit;
+ extern uint32_t dyn86_ev_reclaimed;
+ extern int  dyn86_evict_armed(void);
++
++// HW_PMU profiling: count only the C dispatch lookup (DBGetBlock), excluding
++// translated guest instructions. The branch is thread-local and cold unless
++// the opt-in Vita profile is enabled. Counter reads are PMU register accesses,
++// not syscalls; subtraction is modulo 2^32 for one lookup interval.
++#ifdef __vita__
++static __thread int dyn86_pmu_active;
++static __thread uint64_t dyn86_pmu_dispatch_cycles;
++static __thread uint32_t dyn86_pmu_dispatch_samples;
++static __thread uint32_t dyn86_pmu_dispatch_ordinal;
++static inline uint32_t dyn86_pmu_ccnt(void) {
++    uint32_t v; __asm__ volatile("isb\n\tmrc p15,0,%0,c9,c13,0" : "=r"(v) :: "memory"); return v;
++}
++void dyn86_pmu_set_active(int on) { dyn86_pmu_active = on; }
++void dyn86_pmu_dispatch_reset(void) { dyn86_pmu_dispatch_cycles = 0; dyn86_pmu_dispatch_samples = 0; dyn86_pmu_dispatch_ordinal = 0; }
++uint64_t dyn86_pmu_dispatch_read(void) { return dyn86_pmu_dispatch_cycles * 64ull; }
++uint32_t dyn86_pmu_dispatch_samples_read(void) { return dyn86_pmu_dispatch_samples; }
++#else
++// Keep the shared scheduler linkable on host/qemu builds. PMU access is Vita-only.
++void dyn86_pmu_set_active(int on) { (void)on; }
++void dyn86_pmu_dispatch_reset(void) {}
++uint64_t dyn86_pmu_dispatch_read(void) { return 0; }
++uint32_t dyn86_pmu_dispatch_samples_read(void) { return 0; }
++#endif
+ extern int  dyn86_pool_near_full(void);
+ extern void dyn86_ev_dump(const char* what);
+ /* Combien de sorties reprenables d'affilee un meme fil peut obtenir avant
+@@ -323,7 +341,21 @@ int DynaRun(x86emu_t* emu)
+         if(!box86_dynarec)
+             Run(emu, 0);
+         else {
+-            dynablock_t* block = (skip || ACCESS_FLAG(F_TF))?NULL:DBGetBlock(emu, R_EIP, 1);
++            dynablock_t* block = NULL;
++            if (!(skip || ACCESS_FLAG(F_TF))) {
++#ifdef __vita__
++                const int dispatch_sample = dyn86_pmu_active && ((++dyn86_pmu_dispatch_ordinal & 63u) == 0);
++                uint32_t dispatch_t0 = 0;
++                if (dispatch_sample) dispatch_t0 = dyn86_pmu_ccnt();
++#endif
++                block = DBGetBlock(emu, R_EIP, 1);
++#ifdef __vita__
++                if (dispatch_sample) {
++                    dyn86_pmu_dispatch_cycles += (uint32_t)(dyn86_pmu_ccnt() - dispatch_t0);
++                    ++dyn86_pmu_dispatch_samples;
++                }
++#endif
++            }
+             // D2Vita residual TOCTOU (sequel to the DBGetBlock retry, see the
+             // comment there): the lost-mark path (MarkDynablock: db->done=0,
+             // under mutex_prot only) can still zero done BETWEEN DBGetBlock's
+@@ -462,4 +494,4 @@ int DynaRun(x86emu_t* emu)
+       if (*pd == 1) *pg = *pg + 1;
+       *pd = *pd - 1; }
+     return 0;   // D2Vita: missing return in upstream Box86 (non-void function)
+-}
+\ No newline at end of file
++}

@@ -1,0 +1,390 @@
+diff --git a/build.sh b/build.sh
+index 49069a6..eaacbf4 100755
+--- a/build.sh
++++ b/build.sh
+@@ -81,6 +81,7 @@ $B86/emu/x86compstrings.c
+ $SHIM/shim_impl.c
+ $SHIM/x86run_flags.c
+ $DYN86/dyn86.c
++$DYN86/dyn86_tcache.c
+ $DYN86/alt_table.c
+ $DYN86/dyn86_emitprof.c
+ $DYN86/dyn86_memintrin.c
+diff --git a/src/dynarec86/dyn86.c b/src/dynarec86/dyn86.c
+index fd07b9b..b2711db 100644
+--- a/src/dynarec86/dyn86.c
++++ b/src/dynarec86/dyn86.c
+@@ -158,6 +158,7 @@ void dyn86_init(void)
+         dyn86_jitprof = ((e && e[0] && e[0] != '0') || (f && f[0] && f[0] != '0')) ? 1 : 0;
+         if (dyn86_jitprof) { jp_calibrate(); dyn86_jp_epoch_us = dyn86_jp_now_us(); }
+     }
++    dyn86_tcache_init();
+ }
+ 
+ void dyn86_set_stop(int v) { g_stop = v; }
+diff --git a/src/dynarec86/dyn86.h b/src/dynarec86/dyn86.h
+index d7f6258..4784a56 100644
+--- a/src/dynarec86/dyn86.h
++++ b/src/dynarec86/dyn86.h
+@@ -57,6 +57,22 @@ void dyn86_dump_eipring(void);
+  * init_custommem_helper() and before any translation. */
+ void dyn86_init(void);
+ 
++/* HW-059 fixed-image cache. On-disk access happens before translation and at
++ * process exit; dynarec call sites only touch this in-memory index. */
++typedef struct dyn86_tcache_view_s {
++    uint32_t arm_size, inst_count, flags, instsize_size;
++    const uint8_t *arm, *instsize;
++} dyn86_tcache_view_t;
++void dyn86_tcache_init(void);
++int dyn86_tcache_find(uint32_t eip, const void *source, uint32_t source_size,
++                      dyn86_tcache_view_t *out);
++int dyn86_tcache_code_stable(const uint8_t *code, uint32_t size,
++                             uint32_t guest_lo, uint32_t guest_hi);
++void dyn86_tcache_record(uint32_t eip, const void *source, uint32_t source_size,
++                         const uint8_t *arm, uint32_t arm_size, const void *instsize,
++                         uint32_t inst_count, uint32_t instsize_size, uint32_t flags);
++void dyn86_tcache_report(void);
++
+ /* HW-051: opt-in, low-frequency EIP sampler interface. State: 0 idle, 1 translated guest, 2 native shim. */
+ void dyn86_guestprof_enable(int on);
+ void dyn86_guestprof_set_state(uint32_t state);
+diff --git a/src/dynarec86/dyn86_tcache.c b/src/dynarec86/dyn86_tcache.c
+new file mode 100644
+--- /dev/null
++++ b/src/dynarec86/dyn86_tcache.c
+@@ -0,0 +1,265 @@
++/* HW-059: opt-in persistent cache of fixed-image ARMv7 translations.
++ * Disk I/O is confined to dyn86_tcache_init() and atexit flush; FillBlock
++ * only does short in-memory lookup/copy operations while dynarec locks exist.
++ * Box86 is (c) ptitSeb, MIT; see third_party/box86-dynarec/LICENSE. */
++#include "dyn86.h"
++#include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <unistd.h>
++
++#define TC_MAX_FILE (64u*1024u*1024u)
++#define TC_MAX_ENTRIES 65536u
++#define TC_VERSION 2u
++#define TC_MAGIC "WXTCARM2"
++
++typedef struct __attribute__((packed)) {
++    char magic[8];
++    uint32_t version, count, payload_size, payload_crc;
++    char identity[64];
++    char chain_mode[16];
++} file_header_t;
++typedef struct __attribute__((packed)) {
++    uint32_t eip, source_size, arm_size, inst_count, flags, instsize_size, record_crc;
++} record_header_t;
++typedef struct {
++    record_header_t h;
++    uint8_t *payload; /* source || ARM body || instsize[count+2] */
++} cache_entry_t;
++static cache_entry_t *entries;
++static uint32_t entry_count, entry_cap;
++static pthread_mutex_t entries_mx = PTHREAD_MUTEX_INITIALIZER;
++static int enabled, initialized;
++static char file_path[512], identity[65], chain_mode[16];
++static uint32_t g_guest_lo=0x00400000u, g_guest_hi=0x00479000u;
++static uint64_t hits, misses, saved, rejected;
++static uint64_t read_bytes, written_bytes;
++static int dirty;
++extern char __executable_start[] __attribute__((weak));
++extern char _end[] __attribute__((weak));
++
++static uint32_t crc32_bytes(const uint8_t *p, size_t n) {
++    uint32_t c = ~0u;
++    while (n--) { c ^= *p++; for (unsigned k=0;k<8;k++) c=(c>>1)^(0xedb88320u & (0u-(c&1u))); }
++    return ~c;
++}
++static int write_all(int fd, const uint8_t *p, size_t n) {
++    while(n) {
++        ssize_t wrote=write(fd,p,n);
++        if(wrote<0 && errno==EINTR) continue;
++        if(wrote<=0) return 0;
++        p+=(size_t)wrote; n-=(size_t)wrote;
++    }
++    return 1;
++}
++static int hex_key(const char *s) {
++    if (!s || strlen(s)!=64) return 0;
++    for (unsigned i=0;i<64;i++) if (!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f'))) return 0;
++    return 1;
++}
++static int add_entry(const record_header_t *h, const uint8_t *payload) {
++    if (entry_count>=TC_MAX_ENTRIES) return 0;
++    if (entry_count==entry_cap) {
++        uint32_t cap=entry_cap?entry_cap*2:256;
++        cache_entry_t *p=(cache_entry_t*)realloc(entries, (size_t)cap*sizeof(*p));
++        if (!p) return 0; entries=p; entry_cap=cap;
++    }
++    size_t n=(size_t)h->source_size+h->arm_size+h->instsize_size;
++    uint8_t *copy=(uint8_t*)malloc(n);
++    if (!copy) return 0; memcpy(copy,payload,n);
++    entries[entry_count].h=*h; entries[entry_count].payload=copy; ++entry_count;
++    return 1;
++}
++static void load_file(void) {
++    FILE *f=fopen(file_path,"rb"); if(!f) return;
++    struct stat st; file_header_t h;
++    if(fstat(fileno(f),&st) || st.st_size<(off_t)sizeof(h) || st.st_size>(off_t)TC_MAX_FILE ||
++       fread(&h,1,sizeof(h),f)!=sizeof(h) || memcmp(h.magic,TC_MAGIC,8) || h.version!=TC_VERSION ||
++       h.payload_size!=(uint32_t)(st.st_size-sizeof(h)) || memcmp(h.identity,identity,64) ||
++       memcmp(h.chain_mode,chain_mode,sizeof(chain_mode))) { fclose(f); return; }
++    uint8_t *payload=(uint8_t*)malloc(h.payload_size?h.payload_size:1);
++    if(!payload || fread(payload,1,h.payload_size,f)!=h.payload_size) {
++        free(payload); fclose(f); return;
++    }
++    read_bytes+=(uint64_t)st.st_size;
++    if(crc32_bytes(payload,h.payload_size)!=h.payload_crc) { free(payload); fclose(f); return; }
++    fclose(f);
++    size_t off=0; uint32_t good=0;
++    for(uint32_t i=0;i<h.count;i++) {
++        if(off+sizeof(record_header_t)>h.payload_size) break;
++        record_header_t r; memcpy(&r,payload+off,sizeof(r)); off+=sizeof(r);
++        size_t n=(size_t)r.source_size+r.arm_size+r.instsize_size;
++        if(!r.source_size || !r.arm_size || r.arm_size>4u*1024u*1024u || r.inst_count>65536u || r.instsize_size!=r.inst_count+2u || n>h.payload_size-off) break;
++        if(crc32_bytes(payload+off,n)!=r.record_crc || !add_entry(&r,payload+off)) break;
++        ++good; off+=n;
++    }
++    if(good!=h.count || off!=h.payload_size) { /* parsed prefix is still safe; discard on malformed file */
++        for(uint32_t i=0;i<entry_count;i++) free(entries[i].payload);
++        entry_count=0; ++rejected;
++    }
++    free(payload);
++}
++static void flush_file(void) {
++    if(!enabled || !file_path[0] || !dirty) return;
++    pthread_mutex_lock(&entries_mx);
++    size_t payload_n=0;
++    for(uint32_t i=0;i<entry_count;i++) payload_n+=sizeof(record_header_t)+(size_t)entries[i].h.source_size+entries[i].h.arm_size+entries[i].h.instsize_size;
++    if(payload_n>TC_MAX_FILE-sizeof(file_header_t)) { pthread_mutex_unlock(&entries_mx); return; }
++    size_t total=sizeof(file_header_t)+payload_n;
++    uint8_t *buf=(uint8_t*)malloc(total); if(!buf) { pthread_mutex_unlock(&entries_mx); return; }
++    file_header_t h={{0},TC_VERSION,entry_count,(uint32_t)payload_n,0,{0},{0}};
++    memcpy(h.magic,TC_MAGIC,8); memcpy(h.identity,identity,64);
++    memcpy(h.chain_mode,chain_mode,sizeof(chain_mode));
++    size_t off=sizeof(h);
++    for(uint32_t i=0;i<entry_count;i++) {
++        cache_entry_t *e=&entries[i]; size_t n=(size_t)e->h.source_size+e->h.arm_size+e->h.instsize_size;
++        memcpy(buf+off,&e->h,sizeof(e->h)); off+=sizeof(e->h); memcpy(buf+off,e->payload,n); off+=n;
++    }
++    h.payload_crc=crc32_bytes(buf+sizeof(h),payload_n); memcpy(buf,&h,sizeof(h));
++    pthread_mutex_unlock(&entries_mx);
++    char temp[560]; snprintf(temp,sizeof(temp),"%s.tmp.%ld",file_path,(long)getpid());
++    int fd=open(temp,O_WRONLY|O_CREAT|O_TRUNC,0600);
++    int ok=fd>=0 && write_all(fd,buf,total) && fsync(fd)==0;
++    if(fd>=0) close(fd);
++    if(ok) ok=rename(temp,file_path)==0;
++    if(!ok) unlink(temp);
++    if(ok) { written_bytes+=(uint64_t)total; dirty=0; }
++    free(buf);
++    fprintf(stderr,"[tcache] flush entries=%u bytes=%zu result=%s\n",entry_count,total,ok?"ok":"fail");
++}
++void dyn86_tcache_init(void) {
++    if(initialized++) return;
++    const char *on=getenv("WX86_TCACHE"), *dir=getenv("WX86_TCACHE_DIR"), *id=getenv("WX86_TCACHE_ID");
++    const char *fixed=getenv("WX86_TCACHE_FIXED_IMAGE"), *target=getenv("WX86_TCACHE_TARGET");
++    const char *chain=getenv("WX86_CHAIN"), *cache_chain=getenv("WX86_TCACHE_CHAIN");
++    if(!on || on[0]!='1' || !dir || !hex_key(id) || !fixed || fixed[0]!='1' || !target || strcmp(target,"qemu-arm-static")) return;
++    if(!chain || !cache_chain || strcmp(chain,cache_chain) || (strcmp(chain,"0") && strcmp(chain,"1"))) return;
++    snprintf(chain_mode,sizeof(chain_mode),"chain=%s",chain);
++    if(snprintf(file_path,sizeof(file_path),"%s/winx86-armv7-v2.bin",dir)>=(int)sizeof(file_path)) return;
++    const char *glo=getenv("WX86_TCACHE_GUEST_BASE"), *gsz=getenv("WX86_TCACHE_GUEST_SIZE");
++    if(glo && gsz) {
++        unsigned long lo=strtoul(glo,NULL,0), size=strtoul(gsz,NULL,0);
++        if(lo<=UINT32_MAX && size && size<=UINT32_MAX-lo) { g_guest_lo=(uint32_t)lo; g_guest_hi=(uint32_t)(lo+size); }
++    }
++    memcpy(identity,id,65); enabled=1; load_file();
++    atexit(dyn86_tcache_report); atexit(flush_file);
++    fprintf(stderr,"[tcache] init entries=%u rejected=%llu target=qemu-arm-static\n",entry_count,(unsigned long long)rejected);
++}
++
++int dyn86_tcache_find(uint32_t eip, const void *source, uint32_t source_size, dyn86_tcache_view_t *out) {
++    if(!enabled || !source || !out) return 0;
++    pthread_mutex_lock(&entries_mx);
++    for(uint32_t i=0;i<entry_count;i++) {
++        cache_entry_t *e=&entries[i];
++        if(e->h.eip==eip && e->h.source_size==source_size && !memcmp(e->payload,source,source_size)) {
++            out->arm_size=e->h.arm_size; out->inst_count=e->h.inst_count; out->flags=e->h.flags; out->instsize_size=e->h.instsize_size;
++            out->arm=e->payload+source_size; out->instsize=out->arm+e->h.arm_size; ++hits;
++            pthread_mutex_unlock(&entries_mx); return 1;
++        }
++    }
++    ++misses; pthread_mutex_unlock(&entries_mx); return 0;
++}
++
++int dyn86_tcache_code_stable(const uint8_t *code, uint32_t size, uint32_t guest_lo, uint32_t guest_hi) {
++    uintptr_t image_lo=(uintptr_t)__executable_start, image_hi=(uintptr_t)_end;
++    if(!guest_lo || guest_hi<=guest_lo) { guest_lo=g_guest_lo; guest_hi=g_guest_hi; }
++    if(!image_lo || image_hi<=image_lo) return 0;
++    for(uint32_t i=0;i<size;i+=4) {
++        uint32_t w; memcpy(&w,code+i,4);
++        /* Immediate B/BL survives relocation only when its target is in this
++         * body. External PC-relative control flow is deliberately a miss. */
++        if((w&0x0e000000u)==0x0a000000u) {
++            if((w>>28)==15) return 0; /* BLX immediate carries H/Thumb state. */
++            int32_t rel=(int32_t)(w<<8)>>6;
++            int64_t target=(int64_t)i+8+rel;
++            if(target<0 || target>=(int64_t)size || (target&3)) return 0;
++            continue;
++        }
++        /* PC-based single data transfers are rejected until the format has
++         * typed literal relocations/content validation. */
++        if((w&0x0c000000u)==0x04000000u) {
++            unsigned rn=(w>>16)&15, rm=w&15;
++            if(rn==15) {
++                /* Literal pools need typed relocation/content validation. */
++                return 0;
++            } else if((w&(1u<<25)) && rm==15) return 0;
++            continue;
++        }
++        /* MOVW/MOVT pairs may materialize fixed ELF/guest addresses. Reject
++         * an orphan half and any resolved address outside those ranges. */
++        if((w&0x0ff00000u)==0x03000000u) {
++            uint32_t immlo=(w&0xfffu)|((w>>4)&0xf000u);
++            uint32_t b=0;
++            if(i+4<size) memcpy(&b,code+i+4,4);
++            if(i+4<size && (b&0x0ff00000u)==0x03400000u && ((w>>12)&15)==((b>>12)&15)) {
++                uint32_t value=((b&0xfffu)<<16)|((b>>4)&0xf000u)|immlo;
++                if(!((uintptr_t)value>=image_lo && (uintptr_t)value<image_hi) &&
++                   !(value>=guest_lo && value<guest_hi) && value>=guest_lo) return 0;
++                i+=4;
++            } else if(immlo>=guest_lo) return 0;
++            continue;
++        }
++        if((w&0x0ff00000u)==0x03400000u) {
++            uint32_t immhi=((w&0xfffu)<<16)|((w>>4)&0xf000u);
++            if(immhi) return 0;
++            continue;
++        }
++        /* Coprocessor/VFP arithmetic and register transfers are independent
++         * of the body's host address; PC-based literal loads are rejected. */
++        if((w&0x0e000000u)==0x0c000000u) {
++            if(((w>>16)&15)==15) return 0; /* VFP/coprocessor literal pool. */
++            continue;
++        }
++        if((w&0x0f000000u)==0x0e000000u) continue;
++        if((w&0x0fffff00u)==0x0320f000u) continue; /* ARMv7 hint/NOP family */
++        /* LDM/STM uses a register-selected base; reject the architecturally
++         * invalid PC base while allowing stack saves/restores (including PC). */
++        if((w&0x0e000000u)==0x08000000u) {
++            if(((w>>16)&15)==15) return 0;
++            continue;
++        }
++        /* BX/BLX register and multiply are independent of the body's host
++         * address; recognize them before the data-processing class. */
++        if((w&0x0ffffff0u)==0x012fff10u || (w&0x0ffffff0u)==0x012fff30u ||
++           (w&0x0fc000f0u)==0x00000090u) continue;
++        /* Data processing must not read/write PC; all unclassified ARM
++         * encodings are rejected because their address semantics are unknown. */
++        if((w&0x0c000000u)==0) {
++            unsigned opcode=(w>>21)&15, rn=(w>>16)&15, rd=(w>>12)&15, rm=w&15;
++            if(opcode==8 || opcode==9 || opcode==10 || opcode==11) {
++                if(rn==15 || rd==15 || (!(w&(1u<<25)) && rm==15)) return 0;
++            } else if(rn==15 || rd==15 || (!(w&(1u<<25)) && rm==15)) return 0;
++            continue;
++        }
++        /* Reject every other class (including coprocessor forms). */
++        return 0;
++    }
++    return 1;
++}
++
++void dyn86_tcache_record(uint32_t eip, const void *source, uint32_t source_size,
++                         const uint8_t *arm, uint32_t arm_size, const void *instsize,
++                         uint32_t inst_count, uint32_t instsize_size, uint32_t flags) {
++    if(!enabled || !source || !arm || !instsize || !source_size || !arm_size || arm_size%4 || instsize_size!=inst_count+2u) { ++rejected; return; }
++    if(!dyn86_tcache_code_stable(arm,arm_size,0,0)) { ++rejected; return; }
++    record_header_t h={eip,source_size,arm_size,inst_count,flags,instsize_size,0};
++    size_t n=(size_t)source_size+arm_size+instsize_size;
++    uint8_t *payload=(uint8_t*)malloc(n); if(!payload) { ++rejected; return; }
++    memcpy(payload,source,source_size); memcpy(payload+source_size,arm,arm_size);
++    memcpy(payload+source_size+arm_size,instsize,instsize_size);
++    h.record_crc=crc32_bytes(payload,n);
++    pthread_mutex_lock(&entries_mx);
++    if(add_entry(&h,payload)) { ++saved; dirty=1; } else ++rejected;
++    pthread_mutex_unlock(&entries_mx); free(payload);
++}
++void dyn86_tcache_report(void) {
++    if(enabled) fprintf(stderr,"[tcache] stats hits=%llu misses=%llu saved=%llu rejected=%llu read_bytes=%llu written_bytes=%llu\n",
++       (unsigned long long)hits,(unsigned long long)misses,(unsigned long long)saved,(unsigned long long)rejected,
++       (unsigned long long)read_bytes,(unsigned long long)written_bytes);
++}
+diff --git a/third_party/box86-dynarec/dynarec/dynarec_arm.c b/third_party/box86-dynarec/dynarec/dynarec_arm.c
+index c5e05f7..e9fe900 100755
+--- a/third_party/box86-dynarec/dynarec/dynarec_arm.c
++++ b/third_party/box86-dynarec/dynarec/dynarec_arm.c
+@@ -23,6 +23,7 @@
+ #include "dynarec_arm_private.h"
+ #include "dynarec_arm_functions.h"
+ #include "elfloader.h"
++#include "dyn86.h"
+ 
+ void printf_x86_instruction(zydis_dec_t* dec, instruction_x86_t* inst, const char* name) {
+     uint8_t *ip = (uint8_t*)inst->addr;
+@@ -510,6 +511,45 @@ dynarec_log(LOG_DEBUG, "Asked to Fill block %p with %p\n", block, (void*)addr);
+     if((addr&~box86_pagesize)!=(end&~box86_pagesize)) // need to protect some other pages too
+         protectDB(addr, end-addr);  //end is 1byte after actual end
+     uint32_t hash = X31_hash_code((void*)DYN86_G2H(addr), end-addr);
++    /* HW-059: pass0 supplies the live instruction count and source span. A
++     * cache hit restores only the immutable ARM body + instsize table; the
++     * per-process dynablock header and jmpnext tail are rebuilt below. */
++    if(!helper.always_test) {
++        dyn86_tcache_view_t cached;
++        if(dyn86_tcache_find((uint32_t)addr, (void*)DYN86_G2H(addr), (uint32_t)(end-addr), &cached) &&
++           cached.inst_count==helper.size && cached.instsize_size==(cached.inst_count+2)*sizeof(instsize_t) && !(cached.flags&1) &&
++           dyn86_tcache_code_stable(cached.arm, cached.arm_size, 0, 0)) {
++            size_t insts_rsize=(cached.inst_count+2)*sizeof(instsize_t);
++            insts_rsize=(insts_rsize+7)&~(size_t)7;
++            size_t arm_size=(cached.arm_size+7)&~(size_t)7;
++            size_t sz=sizeof(void*)+arm_size+8*sizeof(void*)+insts_rsize;
++            void *actual_p=(void*)AllocDynarecMap(sz);
++            if(actual_p) {
++                void *p=(void*)((uintptr_t)actual_p+sizeof(void*));
++                void *next=p+arm_size;
++                instsize_t *instsize=(instsize_t*)(next+8*sizeof(void*));
++                memcpy(p,cached.arm,cached.arm_size);
++                memset((uint8_t*)p+cached.arm_size,0,arm_size-cached.arm_size);
++                memcpy(instsize,cached.instsize,(cached.inst_count+2)*sizeof(instsize_t));
++                block->actual_block=actual_p; block->block=p; block->size=(int)sz;
++                block->x86_size=end-addr; block->hash=hash; block->isize=helper.size;
++                block->instsize=instsize; block->jmpnext=next+sizeof(void*);
++                block->always_test=0; block->dirty=0;
++                *(dynablock_t**)actual_p=block; *(dynablock_t**)next=block;
++                *(void**)(next+5*sizeof(void*))=arm_next;
++                CreateJmpNext(block->jmpnext,next+5*sizeof(void*));
++                __clear_cache(actual_p,actual_p+sz);
++                block->hash=X31_hash_code((void*)DYN86_G2H(addr),end-addr);
++                if(block->hash!=hash) { CancelBlock(0); return NULL; }
++                if(!isprotectedDB(addr,end-addr)) {
++                    block->dirty=1;
++                    if(getProtection(addr)&PROT_NEVERCLEAN) block->always_test=1;
++                }
++                current_helper=NULL;
++                return (void*)block;
++            }
++        }
++    }
+     // calculate barriers
+     for(int ii=0; ii<helper.jmp_sz; ++ii) {
+         int i = helper.jmps[ii];
+@@ -720,6 +754,10 @@ dynarec_log(LOG_DEBUG, "Asked to Fill block %p with %p\n", block, (void*)addr);
+         dyn86_jp_x86_insns += (uint64_t)helper.size;
+         dyn86_jp_arm_bytes += (uint64_t)oldarmsize;
+     }
++    if(!block->always_test)
++        dyn86_tcache_record((uint32_t)block->x86_addr,(void*)DYN86_G2H((uintptr_t)block->x86_addr),
++            (uint32_t)block->x86_size,(const uint8_t*)block->block,(uint32_t)oldarmsize,
++            block->instsize,(uint32_t)block->isize,(uint32_t)(block->isize+2)*sizeof(instsize_t),0);
+     current_helper = NULL;
+     //block->done = 1;
+     return (void*)block;
