@@ -12,6 +12,7 @@ This is an experimental source snapshot, not a hardware-tested binary release. N
 | Packaging image tests on clean export | 3 passed, 2 SDK-layout-dependent tests skipped |
 | Standalone generic VPK packaging test with explicit VitaSDK | PASS, six entries, expected TITLEID |
 | Fresh Vita build from exported sources | PASS, generic LiveArea, 1,957,362-byte private verification artifact |
+| README Mermaid diagrams | All four parse with Mermaid 11.12.0; original sequence-diagram error reproduced before correction |
 | Source scan | No executable/game/audio payloads, private keys or token patterns in selected sources |
 | Documentation and publication review | [Acotado / limited review](reviews/publication-review-claude.md); not an exhaustive runtime audit |
 

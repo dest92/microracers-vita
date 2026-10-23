@@ -2,6 +2,10 @@
 
 The Hot Wheels port and its reusable winx86-dx integration are published under **GPL-3.0**; see [LICENSE](LICENSE). Third-party components keep their original licenses and notices. This is an independent homebrew project, not affiliated with or endorsed by Mattel or the original game publisher/developer. Hot Wheels and related names belong to their respective owners. No game license is granted by this source distribution.
 
+## Foundational project: D2Vita
+
+This port builds on **[D2Vita](https://github.com/Franckrst/D2Vita), by Franck Roustan (Franckrst) and contributors**. D2Vita is the upstream starting point for the Vita PE32/Win32 execution approach and the renderer shader sources reused here. Its source is GPL-3.0; retain the applicable notices for reused portions. The generic runtime extracted/maintained as WinVita/winx86 has its separate MIT license and bundled third-party licenses, all preserved below. Hot Wheels-specific integration and reusable winx86-dx work build on that foundation.
+
 ## Included source
 
 | Component | Origin / attribution | License / notice |

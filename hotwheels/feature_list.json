@@ -799,7 +799,7 @@
    "deps": [
     "HW-017"
    ],
-   "status": "in_progress",
+   "status": "done",
    "owner": "sol-cores",
    "milestone": "M6",
    "spec": "hotwheels/specs/065-icono-portada-vita.md",

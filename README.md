@@ -8,6 +8,7 @@ The repository contains port code, reusable Win32 API cores, the published runti
 
 ## Contents
 
+- [Upstream foundation: D2Vita](#upstream-foundation-d2vita)
 - [What runs, and how](#what-runs-and-how)
 - [Frame production and rendering](#frame-production-and-rendering)
 - [Audio and streamed resources](#audio-and-streamed-resources)
@@ -20,6 +21,14 @@ The repository contains port code, reusable Win32 API cores, the published runti
 - [Repository map](#repository-map)
 - [Approach compared with other port families](#approach-compared-with-other-port-families)
 - [Dependencies, licenses, and credits](#dependencies-licenses-and-credits)
+
+## Upstream foundation: D2Vita
+
+This project is based on [D2Vita by Franckrst / Franck Roustan](https://github.com/Franckrst/D2Vita). D2Vita provided the starting point and demonstrated the architecture reused here: execute an original Windows PE32 game on Vita through a PE loader, Win32 import bridge, and Box86-derived x86-to-ARMv7 translator, then adapt the operating-system and hardware interfaces around it. The runtime foundation and relevant renderer shader work are credited to that upstream project; they are not presented as original inventions of this port.
+
+The generic engine is maintained separately as [WinVita / winx86](https://github.com/Franckrst/WinVita). This repository includes a modified source snapshot of that runtime and preserves its MIT and third-party notices. The D2Vita-derived shader sources retain GPL-3.0 notices.
+
+The Hot Wheels-specific work is the title integration: PE/import and COM adapters, DirectDraw/D3D6 behavior, the vitaGL command pipeline, input mapping, file layout, MCI music and DirectSound integration, and the associated tests and diagnostics. Reusing the runtime does not make another game automatically compatible: each title still needs its actual API contracts and guest behavior verified. See [third-party notices](THIRD-PARTY-NOTICES.md) for the dependency and license breakdown.
 
 ## What runs, and how
 
@@ -69,10 +78,10 @@ sequenceDiagram
     participant C as vitaGL consumer
     participant GPU as GXM / GPU
     G->>P: COM draw, state, texture calls
-    P->>Q: acquire Writer; append typed ring operations
+    P->>Q: acquire Writer, append typed ring operations
     P->>Q: publish slot (mutex/condition-variable handoff)
     Q-->>C: take oldest Ready slot as Lease
-    C->>C: replay state and draws; release CPU ring lease
+    C->>C: replay state and draws, release CPU ring lease
     C->>GPU: vitaGL calls submit work to GXM
     GPU-->>C: backend/GXM synchronization governs device resource lifetime
 ```
