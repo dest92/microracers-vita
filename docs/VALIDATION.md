@@ -1,6 +1,6 @@
 # Initial source publication validation
 
-This is an experimental source snapshot, not a hardware-tested binary release. No VPK, commercial game data or game screenshots are published.
+This is an experimental source snapshot, not a hardware-tested binary release. No VPK or commercial game data are published. The README includes a separately labeled screenshot from an earlier Vita3K development run, with provenance in `docs/images/README.md`.
 
 ## Checks run on the exported tree
 

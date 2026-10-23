@@ -35,4 +35,4 @@ These build dependencies are fetched separately; preserve their notices when red
 
 ## Local-only inputs
 
-The retail executable, data, music, original icon/background BMPs, memory dumps, private run captures, and VPKs containing retail artwork stay local. The packaging tool can derive original LiveArea images from the owner's local files; the public build uses generated generic artwork when `HW_ORIGINAL_ART_DIR` is empty. This does not grant permission to redistribute those original assets.
+The retail executable, data, music, original icon/background BMPs, memory dumps, private raw run captures, and VPKs containing retail artwork stay local. Selected gameplay screenshots may appear as explicitly identified documentation examples; their game artwork and trademarks remain with their respective owners and are excluded from the software license. The packaging tool can derive original LiveArea images from the owner's local files; the public build uses generated generic artwork when `HW_ORIGINAL_ART_DIR` is empty. This does not grant permission to redistribute those original assets.

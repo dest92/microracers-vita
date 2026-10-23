@@ -6,6 +6,12 @@ The repository contains port code, reusable Win32 API cores, the published runti
 
 > **Project status:** experimental and hardware-sensitive. Startup and gameplay have been exercised at different evidence levels, but this README makes no claim of stable frame rate, full API compatibility, complete track coverage, or a finished release. Read the evidence and limitations below before drawing conclusions.
 
+## Gameplay preview
+
+![Hot Wheels Micro Racers: OFFICE starting grid running in Vita3K](docs/images/office-vita3k.png)
+
+*Actual Vita3K framebuffer capture, GXP/vitaGL backend, original frame mode. Earlier development build; not a physical-console capture or a performance benchmark. [Capture provenance](docs/images/README.md).*
+
 ## Contents
 
 - [Upstream foundation: D2Vita](#upstream-foundation-d2vita)
@@ -214,7 +220,7 @@ The broader `hotwheels/tests/run_all.sh` includes integration checks with extra 
 3. Copy the contents of your own game's prepared `Program_Files` directory to `ux0:data/hotwheels/` using the steps in [INSTALL.md](hotwheels/docs/INSTALL.md). The runtime expects `HotWheels.exe` and the required data directories there.
 4. Launch the app and inspect `boot.log`, `progress.txt` and, when enabled, `audio.log` under `ux0:data/hotwheels/`.
 
-The VPK contains the port runtime and its own LiveArea metadata, not retail files. The public source repository and release do not include a VPK or game screenshots. Do not commit or publish the executable, converted data packs, music, textures, installer contents, memory dumps or screenshots containing game assets. The extraction/staging flow must keep those files local to the owner.
+The VPK contains the port runtime and its own LiveArea metadata, not retail files. The public repository includes explicitly labeled gameplay screenshots for documentation; they are separate from the software license. It does not distribute a VPK or retail data. Do not commit or publish the executable, converted data packs, music, textures, installer contents or memory dumps. The extraction/staging flow must keep those files local to the owner.
 
 ## Troubleshooting
 
